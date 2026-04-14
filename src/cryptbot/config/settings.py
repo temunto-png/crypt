@@ -64,6 +64,19 @@ class LoggingSettings(BaseModel):
     retention: str = "30 days"
 
 
+_StrategyName = Literal["ma_cross", "momentum", "mean_reversion", "volatility_filter"]
+
+
+class PaperSettings(BaseModel):
+    """Paper trading エンジンの設定。"""
+
+    initial_balance: float = Field(default=1_000_000.0, gt=0)
+    pair: str = "btc_jpy"
+    timeframe: str = "1hour"
+    warmup_bars: int = Field(default=50, gt=0)
+    strategy_name: _StrategyName = "ma_cross"
+
+
 # ---------------------------------------------------------------------------
 # YAML 設定ソース
 # ---------------------------------------------------------------------------
@@ -116,10 +129,12 @@ class Settings(BaseSettings):
     kill_switch: KillSwitchSettings = KillSwitchSettings()
     backtest: BacktestSettings = BacktestSettings()
     logging: LoggingSettings = LoggingSettings()
+    paper: PaperSettings = PaperSettings()
 
     @classmethod
-    def customise_sources(  # type: ignore[override]
+    def settings_customise_sources(  # type: ignore[override]
         cls,
+        settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
@@ -130,7 +145,7 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             dotenv_settings,
-            YamlConfigSource(cls, yaml_path),
+            YamlConfigSource(settings_cls, yaml_path),
             file_secret_settings,
         )
 
@@ -139,10 +154,13 @@ def load_settings(yaml_path: Path | None = None) -> Settings:
     """設定を読み込む。yaml_path を指定した場合はそのファイルを使用する。"""
     if yaml_path is not None:
         # テスト等で yaml_path を明示的に渡す場合
+        _resolved_path = yaml_path
+
         class _Settings(Settings):
             @classmethod
-            def customise_sources(  # type: ignore[override]
+            def settings_customise_sources(  # type: ignore[override]
                 cls,
+                settings_cls: type[BaseSettings],
                 init_settings: PydanticBaseSettingsSource,
                 env_settings: PydanticBaseSettingsSource,
                 dotenv_settings: PydanticBaseSettingsSource,
@@ -152,7 +170,7 @@ def load_settings(yaml_path: Path | None = None) -> Settings:
                     init_settings,
                     env_settings,
                     dotenv_settings,
-                    YamlConfigSource(cls, yaml_path),
+                    YamlConfigSource(settings_cls, _resolved_path),
                     file_secret_settings,
                 )
 

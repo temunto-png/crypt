@@ -1,6 +1,8 @@
 # 暗号資産自動売買システム
 
-BTC/JPY 現物 Long-only の自動売買システム（paper trade MVP）。
+BTC/JPY 現物 Long-only の自動売買システム。
+
+**現在のフェーズ**: バックテスト・基盤実装完了。Paper trade エンジンは未実装。
 
 ## 前提
 
@@ -25,28 +27,26 @@ cp config.example.yaml config.yaml
 pytest
 ```
 
-## 実行（Paper Trade）
+## 実行
 
 ```bash
+# ヘルプ表示
+python -m cryptbot.main --help
+
+# paper モード（現在は「未実装」メッセージを表示して終了）
 python -m cryptbot.main
 ```
 
-## 手動停止手順
+> **注意**: paper trade エンジンは未実装です。`python -m cryptbot.main` を実行しても
+> 取引は行われません。バックテストの実行は `src/cryptbot/backtest/engine.py` を参照してください。
 
-1. `Ctrl+C` でプロセスを停止する
-2. 保有ポジションが残っている場合は bitbank の Web UI から手動でクローズする
-3. `logs/crypt.jsonl` でポジション状態を確認する
+## バックテスト後の Live 移行条件について
 
-**注意**: Kill Switch が発動した場合（最大ドローダウン 15% 超）、システムは自動再開しない。
-再開には以下の手順が必要:
-```bash
-# Kill Switch 解除（慎重に判断すること）
-KILL_SWITCH_OVERRIDE=1 python -m cryptbot.main --override-kill-switch
-```
+以下を**全て**満たすまで live 取引を開始しない（現時点では live モードも未実装）。
 
 ## Live 移行条件チェックリスト
 
-以下を**全て**満たすまで live 取引を開始しない:
+以下を**全て**満たすまで live 取引を開始しない（paper engine 実装後に適用）:
 
 - [ ] バックテストで手数料・スリッページ込み期待値がプラス（bootstrap CI 下限 > 0）
 - [ ] Buy & Hold よりリスク調整後成績が良い
@@ -61,15 +61,14 @@ KILL_SWITCH_OVERRIDE=1 python -m cryptbot.main --override-kill-switch
 - [ ] API キーに出金権限がないことを確認した
 - [ ] ユーザーが明示的に live 移行を許可した
 
-## Live 移行手順
+## Live 移行手順（未実装）
+
+live モードは未実装です。将来実装時は以下を想定:
 
 ```bash
-# 両方の条件が揃った場合のみ live 起動可能
-export TRADING_MODE=live
+# 両方の条件が揃った場合のみ live 起動可能（現在は実行不可）
+export CRYPT_MODE=live
 python -m cryptbot.main --confirm-live
-# > Live 取引モードで起動しようとしています
-# > 取引所: bitbank / 銘柄: BTC/JPY
-# > 続行しますか？ [yes/NO]: yes
 ```
 
 ## ディレクトリ構成
@@ -82,8 +81,8 @@ crypt/
     strategies/       # 取引戦略
     risk/             # リスク管理・Kill Switch
     backtest/         # バックテストエンジン
-    paper/            # Paper trade エンジン
-    execution/        # 注文執行
+    paper/            # Paper trade エンジン（未実装）
+    execution/        # 注文執行（未実装）
     reports/          # レポート生成
     utils/            # ユーティリティ
   tests/              # テスト
@@ -95,5 +94,11 @@ crypt/
 ## 監査ログ整合性チェック
 
 ```bash
-python -m cryptbot.tools.verify_audit_log
+python -m cryptbot.tools.verify_audit_log --db <DB_PATH>
+```
+
+例:
+
+```bash
+python -m cryptbot.tools.verify_audit_log --db data/cryptbot.db
 ```

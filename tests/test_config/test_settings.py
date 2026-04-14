@@ -79,14 +79,39 @@ class TestSettingsFromYaml:
         s = load_settings(yaml_path=yaml_file)
         assert s.mode == "paper"
 
+    def test_yaml_mode_live_is_loaded(self, tmp_path: Path) -> None:
+        """YAML の mode: live が実際に反映されること（P0-01 回帰テスト）。"""
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text("mode: live\n", encoding="utf-8")
+        s = load_settings(yaml_path=yaml_file)
+        assert s.mode == "live"
+
+    def test_yaml_circuit_breaker_is_loaded(self, tmp_path: Path) -> None:
+        """YAML のネスト設定 circuit_breaker.daily_loss_pct が反映されること（P0-01 回帰テスト）。"""
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text(
+            "circuit_breaker:\n  daily_loss_pct: 0.07\n",
+            encoding="utf-8",
+        )
+        s = load_settings(yaml_path=yaml_file)
+        assert s.circuit_breaker.daily_loss_pct == pytest.approx(0.07)
+
+    def test_yaml_cvar_half_pct_is_loaded(self, tmp_path: Path) -> None:
+        """YAML の cvar.half_pct が反映されること（ネスト設定 P0-01 回帰テスト）。"""
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text(
+            "cvar:\n  warn_pct: -0.02\n  half_pct: -0.03\n  stop_pct: -0.05\n",
+            encoding="utf-8",
+        )
+        s = load_settings(yaml_path=yaml_file)
+        assert s.cvar.half_pct == pytest.approx(-0.03)
+
     def test_env_overrides_yaml(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """環境変数が YAML の値より優先されること。"""
         yaml_file = tmp_path / "config.yaml"
-        yaml_file.write_text(
-            yaml.dump({"mode": "paper"}),
-            encoding="utf-8",
-        )
+        yaml_file.write_text("mode: live\n", encoding="utf-8")
         monkeypatch.setenv("CRYPT_MODE", "paper")
         s = load_settings(yaml_path=yaml_file)
         assert s.mode == "paper"
@@ -95,6 +120,16 @@ class TestSettingsFromYaml:
         nonexistent = tmp_path / "no_such_file.yaml"
         s = load_settings(yaml_path=nonexistent)
         assert s.mode == "paper"
+
+    def test_yaml_invalid_value_raises(self, tmp_path: Path) -> None:
+        """YAML に不正値（circuit_breaker.daily_loss_pct: 0）を渡すと ValidationError になること。"""
+        yaml_file = tmp_path / "config.yaml"
+        yaml_file.write_text(
+            "circuit_breaker:\n  daily_loss_pct: 0\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(Exception):
+            load_settings(yaml_path=yaml_file)
 
 
 class TestCircuitBreakerValidation:

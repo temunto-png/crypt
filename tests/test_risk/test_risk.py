@@ -361,7 +361,7 @@ def test_check_entry_monthly_loss_exceeded(risk_manager: RiskManager, cb_setting
 # ------------------------------------------------------------------ #
 
 def test_kill_switch_load_state_restores_active(storage: Storage) -> None:
-    """activate 後に別インスタンスで load_state() しても active が維持されること。"""
+    """activate 後に新しいインスタンスを作ると __init__ で active が自動復元されること（P1-02 回帰テスト）。"""
     ks1 = KillSwitch(storage)
     ks1.activate(
         KillSwitchReason.MAX_DRAWDOWN,
@@ -370,11 +370,9 @@ def test_kill_switch_load_state_restores_active(storage: Storage) -> None:
     )
     assert ks1.active is True
 
-    # 新しいインスタンスで load_state() → active が復元されること
+    # 新しいインスタンス作成 → __init__ 内の load_state() で active が復元される
     ks2 = KillSwitch(storage)
-    assert ks2.active is False  # デフォルトは inactive
-    ks2.load_state()
-    assert ks2.active is True
+    assert ks2.active is True  # P1-02: __init__ で load_state() が呼ばれる
     assert ks2.reason == KillSwitchReason.MAX_DRAWDOWN
 
 
@@ -397,8 +395,41 @@ def test_kill_switch_load_state_inactive_after_deactivate(storage: Storage) -> N
 def test_kill_switch_load_state_no_events(storage: Storage) -> None:
     """イベントがない場合は load_state() 後も inactive であること。"""
     ks = KillSwitch(storage)
-    ks.load_state()
     assert ks.active is False
+
+
+def test_kill_switch_load_state_uninitialzed_db(tmp_path: Path) -> None:
+    """DB 未初期化（audit_log テーブルなし）でも __init__ が例外を発生させないこと（P1-02 回帰テスト）。"""
+    s = Storage(db_path=tmp_path / "fresh.db", data_dir=tmp_path / "data")
+    # initialize() を呼ばない → audit_log テーブルが存在しない
+    ks = KillSwitch(s)  # OperationalError をキャッチして inactive のまま継続
+    assert ks.active is False
+
+
+# ------------------------------------------------------------------ #
+# P1-03: 監査ログ失敗時は fail-closed（例外が伝播すること）
+# ------------------------------------------------------------------ #
+
+def test_kill_switch_activate_fails_if_audit_write_fails(tmp_path: Path) -> None:
+    """audit_log への INSERT が失敗した場合、activate() が例外を伝播すること（P1-03 回帰テスト）。
+
+    kill_switch.activate() は storage.insert_audit_log() を直接呼ぶため、
+    DB 障害が発生した場合は例外が握りつぶされず呼び出し元に伝わる。
+    """
+    import unittest.mock as mock
+
+    s = Storage(db_path=tmp_path / "fail.db", data_dir=tmp_path / "data")
+    s.initialize()
+    ks = KillSwitch(s)
+
+    # insert_audit_log を強制的に失敗させる
+    with mock.patch.object(s, "insert_audit_log", side_effect=RuntimeError("DB write failed")):
+        with pytest.raises(RuntimeError, match="DB write failed"):
+            ks.activate(
+                KillSwitchReason.MANUAL,
+                portfolio_value=1_000_000.0,
+                drawdown_pct=0.0,
+            )
 
 
 # ------------------------------------------------------------------ #

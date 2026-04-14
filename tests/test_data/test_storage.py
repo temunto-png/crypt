@@ -438,11 +438,19 @@ class TestOrders:
             storage.update_order_status(order_id, "SUBMITTED")
 
     def test_duplicate_active_order_raises(self, storage: Storage) -> None:
-        """同一 pair/side の active 注文が 2 件 insert されると IntegrityError が発生すること。"""
+        """同一 pair の active 注文が 2 件 insert されると IntegrityError が発生すること（P2-01）。"""
         import sqlite3
-        storage.insert_order(self._base_order())  # CREATED
+        storage.insert_order(self._base_order())  # CREATED (BUY)
         with pytest.raises(sqlite3.IntegrityError):
-            storage.insert_order(self._base_order())  # 同一 pair/side active → unique 違反
+            storage.insert_order(self._base_order())  # 同一 pair active → unique 違反
+
+    def test_sell_while_buy_active_raises(self, storage: Storage) -> None:
+        """BUY active 中に同一 pair の SELL を insert すると IntegrityError が発生すること（P2-01）。"""
+        import sqlite3
+        storage.insert_order(self._base_order())  # BUY CREATED
+        sell_order = {**self._base_order(), "side": "SELL"}
+        with pytest.raises(sqlite3.IntegrityError):
+            storage.insert_order(sell_order)  # 同一 pair に SELL active → unique 違反
 
     def test_active_constraint_after_fill(self, storage: Storage) -> None:
         """FILLED 後は同一 pair/side の新規 active 注文を insert できること。"""

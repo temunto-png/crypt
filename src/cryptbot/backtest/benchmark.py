@@ -260,6 +260,7 @@ def calculate_random_entry_benchmark(
 def check_live_readiness(
     metrics: "MetricsResult",
     *,
+    cvar_warn_pct: float = -3.0,
     bootstrap_ci: BootstrapCI | None = None,
     bah_result: BuyAndHoldResult | None = None,
     random_result: RandomEntryResult | None = None,
@@ -274,7 +275,7 @@ def check_live_readiness(
     - 最大ドローダウン < 15%
     - Profit Factor > 1.3
     - Sharpe > 0.5
-    - CVaR が計算可能（サンプル不足でない）
+    - CVaR 95%ile が計算可能かつ policy 閾値を下回らないこと
 
     ベンチマークチェック（オプション）:
     - Bootstrap CI 下限 > 0
@@ -283,6 +284,9 @@ def check_live_readiness(
 
     Args:
         metrics: MetricsResult
+        cvar_warn_pct: CVaR 95%ile の許容下限（%単位、デフォルト -3.0%）。
+            risk_policy の warn_pct（fraction単位）× 100 に相当。
+            metrics.cvar_95 はトレードの pnl_pct（%単位）由来のため単位を合わせること。
         bootstrap_ci: BootstrapCI（省略可）
         bah_result: BuyAndHoldResult（省略可）
         random_result: RandomEntryResult（省略可）
@@ -318,10 +322,14 @@ def check_live_readiness(
         metrics.sharpe_ratio > 0.5,
         f"{metrics.sharpe_ratio:.3f}",
     ))
+    cvar_ok = metrics.cvar_95 is not None and metrics.cvar_95 > cvar_warn_pct
+    cvar_detail = (
+        f"{metrics.cvar_95:.2f}%" if metrics.cvar_95 is not None else "サンプル不足"
+    )
     checks.append((
-        "CVaR 計算可能（サンプル数 >= 20）",
-        metrics.cvar_95 is not None,
-        "OK" if metrics.cvar_95 is not None else "サンプル不足",
+        f"CVaR 95%ile > {cvar_warn_pct:.1f}%（サンプル数 >= 20）",
+        cvar_ok,
+        cvar_detail,
     ))
 
     # --- Bootstrap CI チェック ---

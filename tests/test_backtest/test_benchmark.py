@@ -272,3 +272,38 @@ class TestCheckLiveReadiness:
         metrics = _make_metrics()
         result = check_live_readiness(metrics)
         assert len(result.checks) >= 6
+
+    def test_cvar_below_warn_threshold_fails(self) -> None:
+        """cvar_95 が warn 閾値以下の場合は live_ready=False（P1-04 回帰テスト）。"""
+        # cvar_95=-3.0 は cvar_warn_pct=-3.0 と等しい（> でないので FAIL）
+        metrics = _make_metrics(cvar_95=-3.0)
+        result = check_live_readiness(metrics, cvar_warn_pct=-3.0)
+        assert result.live_ready is False
+
+    def test_cvar_dangerous_value_fails(self) -> None:
+        """cvar_95=-10.0 のような危険値は live_ready=False（P1-04 回帰テスト）。"""
+        metrics = _make_metrics(cvar_95=-10.0)
+        result = check_live_readiness(metrics)
+        assert result.live_ready is False
+        failed = [name for name, passed, _ in result.checks if not passed]
+        assert any("CVaR" in name for name in failed)
+
+    def test_cvar_above_threshold_passes(self) -> None:
+        """cvar_95=-2.0 > cvar_warn_pct=-3.0 → CVaR チェック PASS（P1-04 回帰テスト）。"""
+        metrics = _make_metrics(cvar_95=-2.0)
+        # CVaR チェック単体では PASS になること
+        result = check_live_readiness(metrics, cvar_warn_pct=-3.0)
+        cvar_checks = [(passed, detail) for name, passed, detail in result.checks if "CVaR" in name]
+        assert len(cvar_checks) == 1
+        assert cvar_checks[0][0] is True
+
+    def test_cvar_custom_threshold(self) -> None:
+        """カスタム cvar_warn_pct で閾値を変更できること。"""
+        metrics = _make_metrics(cvar_95=-4.5)
+        # デフォルト閾値 -3.0 では FAIL
+        result_default = check_live_readiness(metrics)
+        assert result_default.live_ready is False
+        # 閾値を -5.0 に緩めると CVaR は PASS（他は全て PASS なので live_ready=True）
+        result_loose = check_live_readiness(metrics, cvar_warn_pct=-5.0)
+        cvar_checks = [(passed, _) for name, passed, _ in result_loose.checks if "CVaR" in name]
+        assert cvar_checks[0][0] is True

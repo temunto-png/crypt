@@ -779,3 +779,143 @@ def test_max_trade_loss_triggers_close(
     # max_trade_loss による強制クローズで 1 トレードが発生すること
     assert len(result.trades) >= 1
     assert result.portfolio_states[-1].position_size == 0.0
+
+
+# ------------------------------------------------------------------ #
+# P1-01: CVaR cvar_action が _execute_pending に正しく渡ること
+# ------------------------------------------------------------------ #
+
+def _make_rm_with_cvar(
+    tmp_path: Path,
+    warn_pct: float = -0.03,
+    half_pct: float = -0.04,
+    stop_pct: float = -0.05,
+) -> RiskManager:
+    """CVaR テスト用 RiskManager を生成するヘルパー。"""
+    s = Storage(db_path=tmp_path / "cvar_test.db", data_dir=tmp_path / "cvar_data")
+    s.initialize()
+    ks = KillSwitch(s)
+    cb = CircuitBreakerSettings(
+        max_trade_loss_pct=0.02,
+        daily_loss_pct=0.50,
+        weekly_loss_pct=0.80,
+        monthly_loss_pct=0.90,
+        max_drawdown_pct=0.50,
+        max_consecutive_losses=100,
+    )
+    cvar = CvarSettings(warn_pct=warn_pct, half_pct=half_pct, stop_pct=stop_pct)
+    return RiskManager(settings=cb, cvar_settings=cvar, kill_switch=ks)
+
+
+class _CvarControlStrategy(BaseStrategy):
+    """最初の BUY で 30 件の損失履歴を持たせてから BUY を発行する戦略。
+
+    pre_returns に直近リターンを注入することで CVaR アクションを制御する。
+    """
+
+    def __init__(self, pre_returns: list[float], buy_bar: int) -> None:
+        super().__init__("cvar_control")
+        self._pre_returns = pre_returns
+        self._buy_bar = buy_bar
+
+    def generate_signal(self, data: pd.DataFrame) -> Signal:
+        idx = len(data) - 1
+        ts = datetime.now(JST)
+        if idx == self._buy_bar:
+            return Signal(Direction.BUY, 1.0, "cvar_test_buy", ts)
+        return Signal(Direction.HOLD, 0.0, "hold", ts)
+
+
+def _make_portfolio_for_cvar_test(initial: float = 500_000.0) -> "PortfolioState":
+    """CVaR テスト用のポートフォリオ状態を生成する。"""
+    from datetime import date as date_
+    return PortfolioState(
+        balance=initial,
+        peak_balance=initial,
+        position_size=0.0,
+        entry_price=0.0,
+        daily_loss=0.0,
+        weekly_loss=0.0,
+        monthly_loss=0.0,
+        consecutive_losses=0,
+        last_reset_date=date_(2024, 1, 1),
+        last_weekly_reset=date_(2024, 1, 1),
+        last_monthly_reset=date_(2024, 1, 1),
+    )
+
+
+def test_cvar_half_reduces_position_size(tmp_path: Path) -> None:
+    """CVaR half の場合、次回 BUY のサイズが通常の 50% になること（P1-01 回帰テスト）。"""
+    from datetime import date as date_
+    from cryptbot.strategies.base import Signal, Direction
+
+    rm = _make_rm_with_cvar(tmp_path)
+    strategy = BuyAtBarStrategy(buy_bar=55, sell_bar=99999)
+    engine = BacktestEngine(strategy=strategy, risk_manager=rm, initial_balance=500_000.0)
+
+    price = 5_000_000.0
+    portfolio = _make_portfolio_for_cvar_test()
+    buy_signal = Signal(Direction.BUY, 1.0, "test", datetime(2024, 1, 2, tzinfo=JST))
+    ts = datetime(2024, 1, 2, tzinfo=JST)
+    cur_date = date_(2024, 1, 2)
+
+    # normal サイズを取得
+    p_normal, _, _, _ = engine._execute_pending(
+        pending_signal=buy_signal,
+        cvar_action="normal",
+        execution_price=price,
+        timestamp=ts,
+        current_date=cur_date,
+        portfolio=portfolio,
+        position_entry_time=None,
+        position_entry_price=0.0,
+    )
+    size_normal = p_normal.position_size
+
+    # half サイズを取得
+    p_half, _, _, _ = engine._execute_pending(
+        pending_signal=buy_signal,
+        cvar_action="half",
+        execution_price=price,
+        timestamp=ts,
+        current_date=cur_date,
+        portfolio=portfolio,
+        position_entry_time=None,
+        position_entry_price=0.0,
+    )
+    size_half = p_half.position_size
+
+    assert size_normal > 0, "normal でエントリーされていない"
+    assert size_half > 0, "half でエントリーされていない"
+    assert abs(size_half - round(size_normal * 0.5, 4)) < 0.0001, (
+        f"half サイズが通常の50%になっていない: normal={size_normal}, half={size_half}"
+    )
+
+
+def test_cvar_stop_hold_signal_blocks_entry(tmp_path: Path) -> None:
+    """CVaR stop でループが HOLD に変換したシグナルはエントリーしないこと（P1-01 回帰テスト）。
+
+    ループ内: cvar_action=="stop" → Signal(HOLD, ...) に変換してから _execute_pending を呼ぶ。
+    このテストはその変換後の動作を直接確認する。
+    """
+    from datetime import date as date_
+    from cryptbot.strategies.base import Signal, Direction
+
+    rm = _make_rm_with_cvar(tmp_path)
+    strategy = BuyAtBarStrategy(buy_bar=55, sell_bar=99999)
+    engine = BacktestEngine(strategy=strategy, risk_manager=rm, initial_balance=500_000.0)
+
+    portfolio = _make_portfolio_for_cvar_test()
+    hold_signal = Signal(Direction.HOLD, 0.0, "cvar_block:stop", datetime(2024, 1, 2, tzinfo=JST))
+
+    p_after, _, _, _ = engine._execute_pending(
+        pending_signal=hold_signal,
+        cvar_action="stop",
+        execution_price=5_000_000.0,
+        timestamp=datetime(2024, 1, 2, tzinfo=JST),
+        current_date=date_(2024, 1, 2),
+        portfolio=portfolio,
+        position_entry_time=None,
+        position_entry_price=0.0,
+    )
+    assert p_after.position_size == 0.0, "stop(HOLD)なのにエントリーされた"

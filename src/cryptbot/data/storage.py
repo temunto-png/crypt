@@ -199,9 +199,10 @@ class Storage:
                   updated_at        TEXT NOT NULL
                 );
 
-                -- 同一 pair/side の active（CREATED/SUBMITTED/PARTIAL）注文は 1 件のみ許容する
+                -- Long-only MVP: 同一 pair の active（CREATED/SUBMITTED/PARTIAL）注文は 1 件のみ許容する
+                -- (pair, side) から (pair) に変更: BUY active 中の SELL active を防ぐ
                 CREATE UNIQUE INDEX IF NOT EXISTS orders_active_unique
-                  ON orders(pair, side)
+                  ON orders(pair)
                   WHERE status IN ('CREATED', 'SUBMITTED', 'PARTIAL');
 
                 -- 注文のイベント履歴（append-only: partial fill / cancel 等を記録）
@@ -224,6 +225,21 @@ class Storage:
                   config_json TEXT NOT NULL
                 );
             """)
+
+            # マイグレーション: orders_active_unique を (pair, side) → (pair) に変更
+            # Long-only MVP では同一 pair に active 注文は 1 件のみ許容する
+            idx_row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name='orders_active_unique'"
+            ).fetchone()
+            if idx_row is not None and idx_row[0] is not None and "(pair, side)" in idx_row[0]:
+                conn.execute("DROP INDEX orders_active_unique")
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX orders_active_unique
+                      ON orders(pair)
+                      WHERE status IN ('CREATED', 'SUBMITTED', 'PARTIAL')
+                    """
+                )
 
             # マイグレーション: record_hash カラムが存在しない既存 DB への対応
             al_cols = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}

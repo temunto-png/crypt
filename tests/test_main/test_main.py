@@ -2,12 +2,46 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from cryptbot.main import main, LiveTradingNotImplementedError
 from cryptbot.tools.verify_audit_log import main as verify_main
+from cryptbot.utils.time_utils import JST
+
+
+# ------------------------------------------------------------------ #
+# ヘルパー
+# ------------------------------------------------------------------ #
+
+def _make_ohlcv_and_store(tmp_path: Path, rows: int = 55) -> tuple[Path, Path]:
+    """正規化済み OHLCV を Storage に保存し、DB パスとデータパスを返す。"""
+    from cryptbot.data.normalizer import normalize
+    from cryptbot.data.storage import Storage
+
+    db_path = tmp_path / "paper.db"
+    data_dir = tmp_path / "data"
+    storage = Storage(db_path=db_path, data_dir=data_dir)
+    storage.initialize()
+
+    base = datetime(2024, 1, 1, 9, 0, tzinfo=JST)
+    timestamps = [base + timedelta(hours=i) for i in range(rows)]
+    prices = [5_000_000.0 + i * 1000.0 for i in range(rows)]
+    df = pd.DataFrame({
+        "timestamp": timestamps,
+        "open": prices,
+        "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices],
+        "close": [p * 1.001 for p in prices],
+        "volume": [1.0] * rows,
+    })
+    df = normalize(df)
+    storage.save_ohlcv(df, pair="btc_jpy", timeframe="1hour", year=2024)
+
+    return db_path, data_dir
 
 
 # ------------------------------------------------------------------ #
@@ -21,15 +55,24 @@ class TestMain:
             main(["--help"])
         assert exc.value.code == 0
 
-    def test_paper_mode_returns_zero(self, capsys) -> None:
-        """paper モード（デフォルト）が 0 を返すこと。"""
-        result = main([])
+    def test_paper_mode_returns_zero(self, tmp_path: Path) -> None:
+        """paper モード（デフォルト）が OHLCV データあれば 0 を返すこと。"""
+        db_path, data_dir = _make_ohlcv_and_store(tmp_path)
+        result = main(["--db", str(db_path), "--data-dir", str(data_dir)])
         assert result == 0
 
-    def test_paper_mode_explicit_returns_zero(self) -> None:
+    def test_paper_mode_explicit_returns_zero(self, tmp_path: Path) -> None:
         """--mode paper が 0 を返すこと。"""
-        result = main(["--mode", "paper"])
+        db_path, data_dir = _make_ohlcv_and_store(tmp_path)
+        result = main(["--mode", "paper", "--db", str(db_path), "--data-dir", str(data_dir)])
         assert result == 0
+
+    def test_paper_mode_no_data_returns_one(self, tmp_path: Path) -> None:
+        """OHLCV データが存在しない場合は 1 を返すこと。"""
+        db_path = tmp_path / "empty.db"
+        data_dir = tmp_path / "data"
+        result = main(["--db", str(db_path), "--data-dir", str(data_dir)])
+        assert result == 1
 
     def test_live_mode_raises(self) -> None:
         """`--mode live` で LiveTradingNotImplementedError が発生すること。"""

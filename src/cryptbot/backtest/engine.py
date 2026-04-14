@@ -42,6 +42,102 @@ logger = logging.getLogger(__name__)
 _MAX_RECENT_RETURNS = 50
 
 
+# ---------------------------------------------------------------------------
+# モジュールレベルヘルパー（PaperEngine と共有）
+# ---------------------------------------------------------------------------
+
+def calc_trade_record(
+    entry_time: datetime | None,
+    entry_price: float,
+    exit_time: datetime,
+    exit_price: float,
+    size: float,
+    strategy_name: str,
+    taker_fee_pct: float,
+    slippage_pct: float,
+) -> "TradeRecord":
+    """クローズ時の TradeRecord を計算する（pure function）。
+
+    BacktestEngine._close_position() および PaperEngine から共有される。
+    """
+    fee_entry = size * entry_price * taker_fee_pct
+    slip_entry = size * entry_price * slippage_pct
+    entry_cost = size * entry_price + fee_entry + slip_entry
+
+    fee_exit = size * exit_price * taker_fee_pct
+    slip_exit = size * exit_price * slippage_pct
+    exit_proceeds = size * exit_price - fee_exit - slip_exit
+
+    total_fee = fee_entry + fee_exit
+    total_slippage = slip_entry + slip_exit
+    pnl = exit_proceeds - entry_cost
+    pnl_pct = pnl / entry_cost * 100.0 if entry_cost > 0 else 0.0
+
+    return TradeRecord(
+        entry_time=entry_time if entry_time is not None else exit_time,
+        exit_time=exit_time,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        size=size,
+        pnl=pnl,
+        pnl_pct=pnl_pct,
+        fee=total_fee,
+        slippage=total_slippage,
+        exit_proceeds=exit_proceeds,
+        strategy=strategy_name,
+    )
+
+
+def calc_mark_balance(
+    portfolio: "PortfolioState",
+    close_price: float,
+    taker_fee_pct: float,
+    slippage_pct: float,
+) -> float:
+    """ポジション保有中は mark-to-market で時価評価した残高を返す（pure function）。"""
+    if portfolio.position_size != 0.0:
+        unrealized = portfolio.position_size * close_price * (
+            1 - taker_fee_pct - slippage_pct
+        )
+        return portfolio.balance + unrealized
+    return portfolio.balance
+
+
+def apply_regime_override(
+    signal: "Signal",
+    window: "pd.DataFrame",
+    portfolio: "PortfolioState",
+    timestamp: datetime,
+    regime_detector: "RegimeDetector | None",
+) -> "Signal":
+    """レジームが TREND_DOWN / HIGH_VOL の場合にシグナルをオーバーライドする（pure function）。"""
+    if regime_detector is None:
+        return signal
+    if len(window) < 20 or not _has_regime_columns(window):
+        return signal
+    try:
+        regime = regime_detector.detect(window)
+    except ValueError:
+        return signal
+
+    if regime not in (Regime.TREND_DOWN, Regime.HIGH_VOL):
+        return signal
+
+    if portfolio.position_size != 0.0:
+        return Signal(
+            direction=Direction.SELL,
+            confidence=1.0,
+            reason=f"regime_close:{regime.value}",
+            timestamp=timestamp,
+        )
+    return Signal(
+        direction=Direction.HOLD,
+        confidence=0.0,
+        reason=f"regime_skip:{regime.value}",
+        timestamp=timestamp,
+    )
+
+
 @dataclass
 class TradeRecord:
     """1 ラウンドトリップのトレード記録。"""
@@ -194,6 +290,8 @@ class BacktestEngine:
 
         # バー i のシグナルをバー i+1 で実行するためのバッファ
         pending_signal: Signal | None = None
+        # バー i で算出した cvar_action を翌バーの _execute_pending に渡す
+        pending_cvar_action: str = "normal"
 
         n = len(data)
 
@@ -232,6 +330,7 @@ class BacktestEngine:
             if pending_signal is not None:
                 portfolio, position_entry_time, position_entry_price, trade = self._execute_pending(
                     pending_signal=pending_signal,
+                    cvar_action=pending_cvar_action,
                     execution_price=execution_price,
                     timestamp=timestamp,
                     current_date=current_date,
@@ -284,6 +383,7 @@ class BacktestEngine:
             # ---- CVaR による補正 ----
             if pending_signal.direction == Direction.BUY:
                 cvar_action = self._risk_manager.get_cvar_action(recent_trade_returns)
+                pending_cvar_action = cvar_action
                 if cvar_action == "stop" or self._risk_manager._kill_switch.active:
                     pending_signal = Signal(
                         direction=Direction.HOLD,
@@ -291,6 +391,8 @@ class BacktestEngine:
                         reason=f"cvar_block:{cvar_action}",
                         timestamp=timestamp,
                     )
+            else:
+                pending_cvar_action = "normal"
 
             # ---- equity 記録 ----
             equity_index.append(timestamp)
@@ -357,6 +459,7 @@ class BacktestEngine:
         portfolio: PortfolioState,
         position_entry_time: datetime | None,
         position_entry_price: float,
+        cvar_action: str = "normal",
     ) -> tuple[PortfolioState, datetime | None, float, TradeRecord | None]:
         """pending_signal を execution_price（翌バー open）で実行する。
 
@@ -398,7 +501,6 @@ class BacktestEngine:
                 execution_price,
             )
             if risk_result.allowed:
-                cvar_action = self._risk_manager.get_cvar_action([])  # already filtered in loop
                 size_multiplier = 0.5 if cvar_action == "half" else 1.0
                 size = self._risk_manager.calculate_position_size(portfolio, execution_price)
                 size = round(size * size_multiplier, 4)
@@ -425,40 +527,11 @@ class BacktestEngine:
         timestamp: datetime,
     ) -> Signal:
         """レジームが TREND_DOWN / HIGH_VOL の場合にシグナルをオーバーライドする。"""
-        if self._regime_detector is None:
-            return signal
-        if len(window) < 20 or not _has_regime_columns(window):
-            return signal
-        try:
-            regime = self._regime_detector.detect(window)
-        except ValueError:
-            return signal
-
-        if regime not in (Regime.TREND_DOWN, Regime.HIGH_VOL):
-            return signal
-
-        if portfolio.position_size != 0.0:
-            return Signal(
-                direction=Direction.SELL,
-                confidence=1.0,
-                reason=f"regime_close:{regime.value}",
-                timestamp=timestamp,
-            )
-        return Signal(
-            direction=Direction.HOLD,
-            confidence=0.0,
-            reason=f"regime_skip:{regime.value}",
-            timestamp=timestamp,
-        )
+        return apply_regime_override(signal, window, portfolio, timestamp, self._regime_detector)
 
     def _mark_balance(self, portfolio: PortfolioState, close_price: float) -> float:
         """ポジション保有中は mark-to-market で時価評価した残高を返す。"""
-        if portfolio.position_size != 0.0:
-            unrealized = portfolio.position_size * close_price * (
-                1 - self._taker_fee_pct - self._slippage_pct
-            )
-            return portfolio.balance + unrealized
-        return portfolio.balance
+        return calc_mark_balance(portfolio, close_price, self._taker_fee_pct, self._slippage_pct)
 
     def _close_position(
         self,
@@ -468,37 +541,16 @@ class BacktestEngine:
         exit_price: float,
         size: float,
     ) -> TradeRecord:
-        """ポジションクローズ時の TradeRecord を生成する。
-
-        entry_cost = size * entry_price * (1 + fee + slippage)  ← エントリー時に支払い済み
-        exit_proceeds = size * exit_price * (1 - fee - slippage) ← クローズで受け取る
-        pnl = exit_proceeds - entry_cost
-        """
-        fee_entry = size * entry_price * self._taker_fee_pct
-        slip_entry = size * entry_price * self._slippage_pct
-        entry_cost = size * entry_price + fee_entry + slip_entry
-
-        fee_exit = size * exit_price * self._taker_fee_pct
-        slip_exit = size * exit_price * self._slippage_pct
-        exit_proceeds = size * exit_price - fee_exit - slip_exit
-
-        total_fee = fee_entry + fee_exit
-        total_slippage = slip_entry + slip_exit
-        pnl = exit_proceeds - entry_cost
-        pnl_pct = pnl / entry_cost * 100.0 if entry_cost > 0 else 0.0
-
-        return TradeRecord(
-            entry_time=entry_time if entry_time is not None else exit_time,
-            exit_time=exit_time,
+        """ポジションクローズ時の TradeRecord を生成する。"""
+        return calc_trade_record(
+            entry_time=entry_time,
             entry_price=entry_price,
+            exit_time=exit_time,
             exit_price=exit_price,
             size=size,
-            pnl=pnl,
-            pnl_pct=pnl_pct,
-            fee=total_fee,
-            slippage=total_slippage,
-            exit_proceeds=exit_proceeds,
-            strategy=self._strategy.name,
+            strategy_name=self._strategy.name,
+            taker_fee_pct=self._taker_fee_pct,
+            slippage_pct=self._slippage_pct,
         )
 
     def _make_params(self, warmup_bars: int) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from enum import Enum
 
@@ -26,6 +27,8 @@ class KillSwitch:
         self._reason: KillSwitchReason | None = None
         self._activated_at: datetime | None = None
         self._storage = storage
+        # 起動時に永続化状態を復元する。DB 未初期化時は inactive のまま継続する。
+        self.load_state()
 
     @property
     def active(self) -> bool:
@@ -74,17 +77,25 @@ class KillSwitch:
         audit_log の最新 KILL_SWITCH_ACTIVATED / KILL_SWITCH_DEACTIVATED イベントを確認し、
         プロセス再起動後も kill switch の active 状態を維持する。
         最新イベントが KILL_SWITCH_DEACTIVATED、またはイベントが存在しない場合は inactive。
+        DB 未初期化（audit_log テーブルが存在しない）場合は inactive のまま継続する。
         """
-        with self._storage._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT event_type, signal_reason, timestamp
-                FROM audit_log
-                WHERE event_type IN ('KILL_SWITCH_ACTIVATED', 'KILL_SWITCH_DEACTIVATED')
-                ORDER BY id DESC
-                LIMIT 1
-                """
-            ).fetchone()
+        try:
+            with self._storage._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT event_type, signal_reason, timestamp
+                    FROM audit_log
+                    WHERE event_type IN ('KILL_SWITCH_ACTIVATED', 'KILL_SWITCH_DEACTIVATED')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except sqlite3.OperationalError:
+            # audit_log テーブルが未作成（initialize() 前）の場合は inactive のまま
+            self._active = False
+            self._reason = None
+            self._activated_at = None
+            return
 
         if row is None or row["event_type"] == "KILL_SWITCH_DEACTIVATED":
             self._active = False
