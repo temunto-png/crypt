@@ -1,0 +1,42 @@
+# 暗号資産自動売買システム 設定サンプル
+# このファイルをコピーして config.yaml として使用する
+# APIキーは必ず .env に記載し、このファイルには書かない
+
+# 取引モード: paper（デフォルト）または live
+# live への変更は config だけでは不十分。環境変数 TRADING_MODE=live と
+# --confirm-live CLI フラグの両方が必要（二段階ゲート）
+mode: paper
+
+# Circuit Breaker 設定（動的計算の基準率）
+# 実際の損失閾値は cycle 開始時の現在残高 × 各 pct で計算される
+circuit_breaker:
+  max_trade_loss_pct: 0.02       # 1取引最大損失 2%
+  daily_loss_pct: 0.03           # 日次最大損失 3%
+  weekly_loss_pct: 0.05          # 週次最大損失 5%
+  monthly_loss_pct: 0.10         # 月次最大損失 10%
+  max_drawdown_pct: 0.15         # 最大DD（ピーク残高から）15% → Kill switch
+  max_consecutive_losses: 5      # 連敗停止（ラウンドトリップ単位）
+
+# CVaR 段階対応閾値（直近50トレードのリターン分布の95%ile尾部）
+cvar:
+  warn_pct: -0.03                # -3%: 警告ログ
+  half_pct: -0.04                # -4%: ポジションサイズ半減
+  stop_pct: -0.05                # -5%: 新規エントリー停止
+
+# Kill Switch 設定
+kill_switch:
+  active: false                  # true の場合、起動時に即停止
+
+# バックテスト設定（テスト期間保護）
+# 一度 test_set_evaluated が true になったら再評価禁止
+backtest:
+  test_start_index: null         # テスト期間の開始インデックス（設定後は変更禁止）
+  test_set_evaluated: false      # テスト期間の評価済みフラグ（1回のみ true に）
+  test_set_data_hash: null       # データ整合性チェック用 SHA256 ハッシュ
+
+# ロギング設定
+logging:
+  log_dir: logs
+  level: DEBUG
+  rotation: "1 day"
+  retention: "30 days"
