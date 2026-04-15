@@ -214,6 +214,20 @@ class TestCancelOrder:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_cancel_order_returns_true_on_partially_filled_cancel(self) -> None:
+        """CANCELED_PARTIALLY_FILLED ステータスのとき True を返すこと。"""
+        mock_post = AsyncMock(return_value=_make_response({
+            "success": 1,
+            "data": {
+                "order_id": 12345,
+                "status": "CANCELED_PARTIALLY_FILLED",
+            },
+        }))
+        exchange = _make_private_exchange(mock_post=mock_post)
+        result = await exchange.cancel_order("btc_jpy", "12345")
+        assert result is True
+
+    @pytest.mark.asyncio
     async def test_cancel_order_returns_false_on_other_status(self) -> None:
         """FULLY_FILLED ステータス（約定済み）のとき False を返すこと。"""
         mock_post = AsyncMock(return_value=_make_response({
@@ -353,6 +367,40 @@ class TestRetryBehavior:
         assert mock_get.call_count == 3
 
     @pytest.mark.asyncio
+    async def test_get_retry_regenerates_nonce(self) -> None:
+        """GET リトライ時に異なる nonce が生成されること（毎回新しい nonce を使う）。"""
+        captured_headers: list[dict] = []
+        call_count = [0]
+
+        async def mock_get_with_capture(url: str, headers: dict) -> MagicMock:
+            call_count[0] += 1
+            captured_headers.append(dict(headers))
+            if call_count[0] < 3:
+                # 1回目と2回目は 429 を返す
+                return _make_http_error_response(429)
+            # 3回目は成功
+            return _make_response(self.ASSETS_RESPONSE)
+
+        client = MagicMock(spec=httpx.AsyncClient)
+        client.get = mock_get_with_capture
+        exchange = BitbankPrivateExchange(
+            api_key=TEST_API_KEY,
+            api_secret=TEST_API_SECRET,
+            client=client,
+        )
+
+        result = await exchange.get_assets()
+        assert result["jpy"] == pytest.approx(100000.0)
+        assert len(captured_headers) == 3
+        # 各試行の nonce が異なること
+        nonce1 = captured_headers[0]["ACCESS-NONCE"]
+        nonce2 = captured_headers[1]["ACCESS-NONCE"]
+        nonce3 = captured_headers[2]["ACCESS-NONCE"]
+        assert nonce1 != nonce2 != nonce3
+        assert int(nonce2) > int(nonce1)
+        assert int(nonce3) > int(nonce2)
+
+    @pytest.mark.asyncio
     async def test_post_retry_on_429(self) -> None:
         """POST: 429 が1回続いた後に成功すること。"""
         mock_post = AsyncMock(side_effect=[
@@ -373,6 +421,46 @@ class TestRetryBehavior:
         result = await exchange.place_order("btc_jpy", "buy", "market", 0.001)
         assert result["order_id"] == 1
         assert mock_post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_post_retry_regenerates_nonce(self) -> None:
+        """POST リトライ時に異なる nonce が生成されること（毎回新しい nonce を使う）。"""
+        captured_headers: list[dict] = []
+
+        async def mock_post_with_capture(url: str, content: str | bytes, headers: dict) -> MagicMock:
+            captured_headers.append(dict(headers))
+            if len(captured_headers) == 1:
+                # 1回目は 429 を返す
+                return _make_http_error_response(429)
+            # 2回目は成功
+            return _make_response({
+                "success": 1,
+                "data": {
+                    "order_id": 1,
+                    "pair": "btc_jpy",
+                    "side": "buy",
+                    "type": "market",
+                    "amount": "0.001",
+                    "status": "UNFILLED",
+                },
+            })
+
+        client = MagicMock(spec=httpx.AsyncClient)
+        client.post = mock_post_with_capture
+        exchange = BitbankPrivateExchange(
+            api_key=TEST_API_KEY,
+            api_secret=TEST_API_SECRET,
+            client=client,
+        )
+
+        result = await exchange.place_order("btc_jpy", "buy", "market", 0.001)
+        assert result["order_id"] == 1
+        assert len(captured_headers) == 2
+        # 1回目と2回目の nonce が異なること
+        nonce1 = captured_headers[0]["ACCESS-NONCE"]
+        nonce2 = captured_headers[1]["ACCESS-NONCE"]
+        assert nonce1 != nonce2
+        assert int(nonce2) > int(nonce1)
 
 
 # ------------------------------------------------------------------ #

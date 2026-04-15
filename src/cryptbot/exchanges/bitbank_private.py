@@ -95,7 +95,6 @@ class BitbankPrivateExchange(BitbankExchange):
         """
         url = f"{self.PRIVATE_BASE_URL}{path}"
         body_json = json.dumps(body, separators=(",", ":"))
-        headers = self._auth_headers(path, body_json)
 
         try:
             async for attempt in AsyncRetrying(
@@ -105,6 +104,8 @@ class BitbankPrivateExchange(BitbankExchange):
                 reraise=True,
             ):
                 with attempt:
+                    # POST: nonce と body のみで署名（path は含めない）
+                    headers = self._auth_headers("", body_json)
                     try:
                         response = await self._client.post(
                             url,
@@ -164,7 +165,6 @@ class BitbankPrivateExchange(BitbankExchange):
             full_path = f"{path}?{qs}"
 
         url = f"{self.PRIVATE_BASE_URL}{full_path}"
-        headers = self._auth_headers(full_path)
 
         try:
             async for attempt in AsyncRetrying(
@@ -174,6 +174,8 @@ class BitbankPrivateExchange(BitbankExchange):
                 reraise=True,
             ):
                 with attempt:
+                    # GET: 毎回新しい nonce を生成してヘッダーを作成
+                    headers = self._auth_headers(full_path)
                     try:
                         response = await self._client.get(url, headers=headers)
                         response.raise_for_status()
@@ -262,7 +264,7 @@ class BitbankPrivateExchange(BitbankExchange):
         """POST /v1/user/spot/cancel_order — 注文キャンセル。
 
         Returns:
-            True if successfully cancelled (CANCELED_UNFILLED)
+            True if successfully cancelled (CANCELED_UNFILLED or CANCELED_PARTIALLY_FILLED)
 
         Raises:
             ExchangeError: API エラー
@@ -271,7 +273,7 @@ class BitbankPrivateExchange(BitbankExchange):
             "pair": pair,
             "order_id": int(order_id),
         })
-        return data["data"].get("status") == "CANCELED_UNFILLED"
+        return data["data"].get("status") in {"CANCELED_UNFILLED", "CANCELED_PARTIALLY_FILLED"}
 
     async def get_open_orders(self, pair: str) -> list[dict]:
         """GET /v1/user/spot/active_orders — 未決済注文一覧。"""
