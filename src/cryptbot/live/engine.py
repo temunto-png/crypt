@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 from cryptbot.config.settings import LiveSettings
 from cryptbot.data.storage import Storage
 from cryptbot.execution.live_executor import DuplicateOrderError, LiveExecutor
+from cryptbot.live.gate import LiveGateError
 from cryptbot.live.state import LiveState, LiveStateStore
 from cryptbot.risk.manager import PortfolioState, RiskManager
 from cryptbot.strategies.base import BaseStrategy, Direction, Signal
@@ -108,12 +110,19 @@ class LiveEngine:
     # パブリック API
     # ------------------------------------------------------------------
 
-    async def run(self) -> None:
+    async def run(self, assets: dict[str, float] | None = None) -> None:
         """メインループ。asyncio.run(engine.run()) から呼ぶ。
+
+        Args:
+            assets: verify_api_permissions() から取得した残高辞書。
+                    {"jpy": float, "btc": float} 形式。
+                    None の場合は残高同期をスキップ（テスト用途）。
 
         KeyboardInterrupt / asyncio.CancelledError で graceful shutdown。
         bar_loop または partial_fill_loop が例外を送出した場合は両タスクを停止して伝播。
         """
+        await self._sync_initial_balance(assets)
+
         bar_task = asyncio.create_task(self._bar_loop(), name="bar_loop")
         partial_task = asyncio.create_task(
             self._partial_fill_loop(), name="partial_fill_loop"
@@ -508,7 +517,60 @@ class LiveEngine:
 
     def _init_fresh_state(
         self,
+        balance: float = 0.0,
     ) -> tuple[PortfolioState, Signal | None, str, list[float], datetime | None, float]:
-        """初回起動時の状態を生成する。残高は 0 で初期化（起動時に別途同期）。"""
-        portfolio = self._make_initial_portfolio(0.0)
+        """初回起動時の状態を生成する。"""
+        portfolio = self._make_initial_portfolio(balance)
         return portfolio, None, "normal", [], None, 0.0
+
+    async def _sync_initial_balance(self, assets: dict[str, float] | None) -> None:
+        """live 起動時に取引所の実残高を LiveState に同期する。
+
+        - assets=None: スキップ（テスト用途）
+        - 初回起動（LiveState なし）: assets["jpy"] を balance として初期 LiveState を作成
+        - 再起動（既存 LiveState あり）: balance_sync_tolerance_pct で差分検証し、許容内なら上書き
+        """
+        if assets is None:
+            return
+
+        jpy = assets.get("jpy", 0.0)
+        btc = assets.get("btc", 0.0)
+        existing = self._state_store.load()
+
+        if existing is None:
+            if btc >= self._settings.min_order_size_btc:
+                logger.warning(
+                    "live engine: 起動時に BTC 残高 %.6f を検出。"
+                    "エントリー価格不明のため position_size=0 で起動します。手動確認を推奨。",
+                    btc,
+                )
+            portfolio = self._make_initial_portfolio(jpy)
+            state = LiveStateStore.from_portfolio_state(
+                portfolio=portfolio,
+                pending_signal=None,
+                pending_cvar_action="normal",
+                recent_trade_returns=[],
+                position_entry_time=None,
+                position_entry_price=0.0,
+                last_processed_bar_ts=None,
+                last_price=0.0,
+            )
+            self._state_store.save(state)
+            logger.info("live engine: 初回起動 balance=%.0f JPY", jpy)
+        else:
+            if existing.balance > 0:
+                diff_pct = abs(jpy - existing.balance) / existing.balance
+                if diff_pct > self._settings.balance_sync_tolerance_pct:
+                    raise LiveGateError(
+                        f"実残高 ({jpy:.0f} JPY) と内部残高 ({existing.balance:.0f} JPY) の乖離が "
+                        f"許容差 ({self._settings.balance_sync_tolerance_pct:.1%}) を超えています "
+                        f"(乖離率: {diff_pct:.1%})。手動確認後に再起動してください。"
+                    )
+            old_balance = existing.balance
+            existing.balance = jpy
+            existing.updated_at = now_jst().isoformat()
+            self._state_store.save(existing)
+            logger.info(
+                "live engine: 再起動 残高同期 internal=%.0f → actual=%.0f JPY",
+                old_balance, jpy,
+            )

@@ -223,7 +223,7 @@ def _run_live(args: argparse.Namespace) -> int:
             f"pair={settings.live.pair}  tf={settings.live.timeframe}"
         )
 
-        await engine.run()
+        await engine.run(assets=assets)
 
     try:
         asyncio.run(_live_async())

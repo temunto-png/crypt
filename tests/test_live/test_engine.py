@@ -557,3 +557,84 @@ class TestRunGracefulShutdown:
                 pass  # 期待通り
 
         await _run_and_cancel()  # 例外が出なければ OK
+
+
+# ------------------------------------------------------------------ #
+# _sync_initial_balance / run(assets)
+# ------------------------------------------------------------------ #
+
+class TestSyncInitialBalance:
+    """_sync_initial_balance / run(assets) のテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_first_run_sets_balance_from_assets(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """初回起動時に assets["jpy"] が LiveState.balance に反映される。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        assets = {"jpy": 500_000.0, "btc": 0.0}
+        await engine._sync_initial_balance(assets)
+
+        loaded = state_store.load()
+        assert loaded is not None
+        assert loaded.balance == 500_000.0
+
+    @pytest.mark.asyncio
+    async def test_first_run_with_btc_logs_warning(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """初回起動時に BTC 残高がある場合 WARNING が出る。"""
+        import logging
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        assets = {"jpy": 500_000.0, "btc": 0.001}
+        with patch("cryptbot.live.engine.logger") as mock_logger:
+            await engine._sync_initial_balance(assets)
+        mock_logger.warning.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_syncs_balance_within_tolerance(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に許容差内の乖離は実残高で上書きされる。"""
+        _seed_state(state_store, balance=1_000_000.0)
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        # balance_sync_tolerance_pct=0.001 → 1000円未満の差は許容
+        assets = {"jpy": 1_000_500.0, "btc": 0.0}
+        await engine._sync_initial_balance(assets)
+
+        loaded = state_store.load()
+        assert loaded is not None
+        assert loaded.balance == 1_000_500.0
+
+    @pytest.mark.asyncio
+    async def test_restart_raises_on_tolerance_exceeded(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に乖離が許容差超過なら LiveGateError を raise する。"""
+        from cryptbot.live.gate import LiveGateError
+        _seed_state(state_store, balance=1_000_000.0)
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        # 10% 乖離 → tolerance 0.1% を超える
+        assets = {"jpy": 900_000.0, "btc": 0.0}
+        with pytest.raises(LiveGateError):
+            await engine._sync_initial_balance(assets)
+
+    @pytest.mark.asyncio
+    async def test_assets_none_skips_sync(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """assets=None の場合は同期をスキップする。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        await engine._sync_initial_balance(None)
+
+        assert state_store.load() is None
