@@ -211,12 +211,17 @@ class LiveEngine:
             entry_time = LiveStateStore.extract_position_entry_time(live_state)
             entry_price = live_state.position_entry_price
 
+        # ---- close_price と前バー価格を早期抽出 ----
+        close_price = float(current_bar["close"])
+        existing_last_price = live_state.last_price if live_state is not None else 0.0
+
         # ---- Kill switch チェック ----
         if self._risk_manager._kill_switch.active:
             logger.warning("live engine: kill switch が active のためスキップ")
             self._save_state(
                 portfolio, None, "normal", recent_returns,
                 entry_time, entry_price, current_bar_ts,
+                last_price=existing_last_price,
             )
             return LiveRunResult(
                 bar_timestamp=current_bar_ts,
@@ -227,8 +232,6 @@ class LiveEngine:
                 skipped=True,
                 skip_reason="kill_switch_active",
             )
-
-        close_price = float(current_bar["close"])
         order_submitted = False
 
         # ---- 前回バーの pending_signal を今バーの open 価格で発注 ----
@@ -237,6 +240,8 @@ class LiveEngine:
                 pending_signal=pending_signal,
                 cvar_action=pending_cvar_action,
                 current_bar_ts=current_bar_ts,
+                portfolio=portfolio,
+                current_price=existing_last_price,
             )
 
         # ---- per-bar リスク制御: max_trade_loss ----
@@ -258,6 +263,7 @@ class LiveEngine:
                 self._save_state(
                     portfolio, new_pending, "normal", recent_returns,
                     entry_time, entry_price, current_bar_ts,
+                    last_price=close_price,
                 )
                 return LiveRunResult(
                     bar_timestamp=current_bar_ts,
@@ -275,6 +281,7 @@ class LiveEngine:
             self._save_state(
                 portfolio, None, "normal", recent_returns,
                 entry_time, entry_price, current_bar_ts,
+                last_price=close_price,
             )
             return LiveRunResult(
                 bar_timestamp=current_bar_ts,
@@ -319,6 +326,7 @@ class LiveEngine:
         self._save_state(
             portfolio, pending_to_save, cvar_action, recent_returns,
             entry_time, entry_price, current_bar_ts,
+            last_price=close_price,
         )
 
         return LiveRunResult(
@@ -383,6 +391,8 @@ class LiveEngine:
         pending_signal: Signal,
         cvar_action: str,
         current_bar_ts: datetime,
+        portfolio: PortfolioState,
+        current_price: float,
     ) -> bool:
         """pending_signal を取引所に発注する。
 
@@ -396,11 +406,19 @@ class LiveEngine:
 
         side = "buy" if pending_signal.direction == Direction.BUY else "sell"
 
-        # サイズチェック（BUY のみ）
-        size = self._settings.min_order_size_btc  # 最小サイズで発注（RiskManager計算は今後）
         if pending_signal.direction == Direction.BUY:
+            raw_size = self._risk_manager.calculate_position_size(portfolio, current_price)
+            size_multiplier = 0.5 if cvar_action == "half" else 1.0
+            size = round(math.floor(raw_size * size_multiplier / 0.0001) * 0.0001, 4)
             if size < self.MIN_BTC_ORDER:
-                logger.warning("live engine: 注文サイズが最小値未満のためスキップ (%.4f)", size)
+                logger.warning("live engine: BUY サイズ不足でスキップ (%.4f)", size)
+                return False
+        else:  # SELL
+            size = portfolio.position_size
+            if size < self.MIN_BTC_ORDER:
+                logger.warning(
+                    "live engine: SELL ポジションなしのためスキップ (%.4f)", size
+                )
                 return False
 
         try:
@@ -487,6 +505,7 @@ class LiveEngine:
         entry_time: datetime | None,
         entry_price: float,
         bar_ts: datetime,
+        last_price: float = 0.0,
     ) -> None:
         state = LiveStateStore.from_portfolio_state(
             portfolio=portfolio,
@@ -496,6 +515,7 @@ class LiveEngine:
             position_entry_time=entry_time,
             position_entry_price=entry_price,
             last_processed_bar_ts=bar_ts,
+            last_price=last_price,
         )
         self._state_store.save(state)
 

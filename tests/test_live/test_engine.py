@@ -298,6 +298,10 @@ class TestRunOneBarOrderPlacement:
     ) -> None:
         """SELL pending signal が次のバーで executor.place_order(side='sell') を呼ぶ。"""
         _seed_state(state_store)
+        # position_size > 0 でないと SELL がスキップされるため直接書き換える
+        existing = state_store.load()
+        existing.position_size = 0.05
+        state_store.save(existing)
         engine = _make_engine(
             AlwaysSellStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
@@ -661,3 +665,132 @@ class TestSyncInitialBalance:
         assert loaded is not None
         assert loaded.balance == 1_000_500.0
         assert loaded.peak_balance == 1_000_500.0
+
+
+# ------------------------------------------------------------------ #
+# _submit_pending: 発注サイズ計算
+# ------------------------------------------------------------------ #
+
+class TestSubmitPendingSize:
+    """_submit_pending() の発注サイズ計算テスト。"""
+
+    @pytest.fixture()
+    def engine_with_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> LiveEngine:
+        _seed_state(state_store, balance=1_000_000.0)
+        # last_price を設定するために state を直接書き換える
+        existing = state_store.load()
+        existing.last_price = 5_000_000.0
+        state_store.save(existing)
+        return _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+
+    @pytest.mark.asyncio
+    async def test_buy_size_uses_risk_manager(
+        self, engine_with_state, risk_manager, state_store
+    ) -> None:
+        """BUY 発注サイズが RiskManager.calculate_position_size() に従う。"""
+        from cryptbot.utils.time_utils import JST
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+        current_price = 5_000_000.0
+
+        # calculate_position_size(1_000_000, 5_000_000) = floor(0.3 * 1_000_000 / 5_000_000 / 0.0001) * 0.0001
+        # = floor(0.06 / 0.0001) * 0.0001 = 600 * 0.0001 = 0.06
+        expected_size = 0.06
+
+        await engine_with_state._submit_pending(
+            pending_signal=buy_signal,
+            cvar_action="normal",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=current_price,
+        )
+
+        call_args = engine_with_state._executor.place_order.call_args
+        assert call_args.kwargs["size"] == expected_size
+
+    @pytest.mark.asyncio
+    async def test_buy_size_halved_on_cvar_half(
+        self, engine_with_state, state_store
+    ) -> None:
+        """CVaR half の場合 BUY サイズが半減される。"""
+        from cryptbot.utils.time_utils import JST
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+
+        await engine_with_state._submit_pending(
+            pending_signal=buy_signal,
+            cvar_action="half",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=5_000_000.0,
+        )
+
+        call_args = engine_with_state._executor.place_order.call_args
+        # 0.06 * 0.5 = 0.03
+        assert call_args.kwargs["size"] == 0.03
+
+    @pytest.mark.asyncio
+    async def test_buy_skipped_when_price_zero(
+        self, engine_with_state
+    ) -> None:
+        """current_price=0 の場合 BUY をスキップして False を返す。"""
+        from cryptbot.utils.time_utils import JST
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+
+        result = await engine_with_state._submit_pending(
+            pending_signal=buy_signal,
+            cvar_action="normal",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=0.0,
+        )
+
+        assert result is False
+        engine_with_state._executor.place_order.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sell_uses_position_size(
+        self, engine_with_state
+    ) -> None:
+        """SELL 発注サイズが portfolio.position_size になる。"""
+        from cryptbot.utils.time_utils import JST
+        import dataclasses
+        sell_signal = Signal(Direction.SELL, 1.0, "test_sell", datetime.now(JST))
+        portfolio = _make_portfolio()
+        portfolio = dataclasses.replace(portfolio, position_size=0.05)
+
+        await engine_with_state._submit_pending(
+            pending_signal=sell_signal,
+            cvar_action="normal",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=5_000_000.0,
+        )
+
+        call_args = engine_with_state._executor.place_order.call_args
+        assert call_args.kwargs["size"] == 0.05
+
+    @pytest.mark.asyncio
+    async def test_sell_skipped_when_no_position(
+        self, engine_with_state
+    ) -> None:
+        """position_size=0 の SELL は発注されず False を返す。"""
+        from cryptbot.utils.time_utils import JST
+        sell_signal = Signal(Direction.SELL, 1.0, "test_sell", datetime.now(JST))
+        portfolio = _make_portfolio()  # position_size=0.0
+
+        result = await engine_with_state._submit_pending(
+            pending_signal=sell_signal,
+            cvar_action="normal",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=5_000_000.0,
+        )
+
+        assert result is False
+        engine_with_state._executor.place_order.assert_not_awaited()
