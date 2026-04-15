@@ -77,6 +77,19 @@ class PaperSettings(BaseModel):
     strategy_name: _StrategyName = "ma_cross"
 
 
+class LiveSettings(BaseModel):
+    """Live trading エンジンの設定。"""
+
+    pair: str = "btc_jpy"
+    timeframe: str = "1hour"
+    warmup_bars: int = Field(default=50, gt=0)
+    strategy_name: _StrategyName = "ma_cross"
+    partial_fill_poll_interval_sec: int = Field(default=1800, ge=60)
+    balance_sync_tolerance_pct: float = Field(default=0.001, gt=0, lt=1)
+    order_timeout_sec: int = Field(default=7200, ge=300)
+    min_order_size_btc: float = Field(default=0.0001, gt=0)
+
+
 class ModelSettings(BaseModel):
     """ML モデルフィルターの設定。"""
 
@@ -143,6 +156,7 @@ class Settings(BaseSettings):
     backtest: BacktestSettings = BacktestSettings()
     logging: LoggingSettings = LoggingSettings()
     paper: PaperSettings = PaperSettings()
+    live: LiveSettings = LiveSettings()
     model: ModelSettings = ModelSettings()
 
     @classmethod

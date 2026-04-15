@@ -121,3 +121,7 @@ class BaseExchange(ABC):
     @abstractmethod
     async def get_open_orders(self, pair: str) -> list[dict]:
         """未約定注文一覧を返す"""
+
+    @abstractmethod
+    async def get_order(self, pair: str, order_id: str) -> dict:
+        """注文情報を取得する。取引所が返す注文 dict を返す"""

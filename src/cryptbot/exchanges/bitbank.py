@@ -192,6 +192,9 @@ class BitbankExchange(BaseExchange):
     async def get_open_orders(self, pair: str) -> list[dict]:
         raise NotImplementedError("get_open_orders は Phase 2 で実装予定です。")
 
+    async def get_order(self, pair: str, order_id: str) -> dict:
+        raise NotImplementedError("get_order は Phase 4 で実装予定です。")
+
     # ------------------------------------------------------------------ #
     # 内部ヘルパー
     # ------------------------------------------------------------------ #
