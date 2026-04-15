@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from cryptbot.main import main, LiveTradingNotImplementedError
+from cryptbot.main import main
 from cryptbot.tools.verify_audit_log import main as verify_main
 from cryptbot.utils.time_utils import JST
 
@@ -74,20 +74,26 @@ class TestMain:
         result = main(["--db", str(db_path), "--data-dir", str(data_dir)])
         assert result == 1
 
-    def test_live_mode_raises(self) -> None:
-        """`--mode live` で LiveTradingNotImplementedError が発生すること。"""
-        with pytest.raises(LiveTradingNotImplementedError):
-            main(["--mode", "live"])
+    def test_live_mode_gate_fails_without_env(self, tmp_path: Path) -> None:
+        """`--mode live` は CRYPT_MODE=live 未設定時にゲートチェック失敗で 1 を返すこと。"""
+        db_path = tmp_path / "live.db"
+        data_dir = tmp_path / "data"
+        result = main(["--mode", "live", "--db", str(db_path), "--data-dir", str(data_dir)])
+        assert result == 1
 
-    def test_confirm_live_flag_alone_raises(self) -> None:
-        """`--confirm-live` だけでも LiveTradingNotImplementedError が発生すること。"""
-        with pytest.raises(LiveTradingNotImplementedError):
-            main(["--confirm-live"])
+    def test_live_mode_with_confirm_gate_fails_without_env(self, tmp_path: Path) -> None:
+        """`--mode live --confirm-live` も CRYPT_MODE=live 未設定時にゲートチェック失敗で 1 を返すこと。"""
+        db_path = tmp_path / "live.db"
+        data_dir = tmp_path / "data"
+        result = main(["--mode", "live", "--confirm-live", "--db", str(db_path), "--data-dir", str(data_dir)])
+        assert result == 1
 
-    def test_live_mode_with_confirm_raises(self) -> None:
-        """`--mode live --confirm-live` でも LiveTradingNotImplementedError が発生すること。"""
-        with pytest.raises(LiveTradingNotImplementedError):
-            main(["--mode", "live", "--confirm-live"])
+    def test_confirm_live_flag_alone_runs_paper(self, tmp_path: Path) -> None:
+        """`--confirm-live` 単体は paper モードとして動作し、データなしで 1 を返すこと。"""
+        db_path = tmp_path / "paper.db"
+        data_dir = tmp_path / "data"
+        result = main(["--confirm-live", "--db", str(db_path), "--data-dir", str(data_dir)])
+        assert result == 1
 
 
 # ------------------------------------------------------------------ #
