@@ -861,6 +861,21 @@ class Storage:
     # config_snapshot
     # ------------------------------------------------------------------ #
 
+    def get_order_exchange_id(self, order_id: int) -> str | None:
+        """orders テーブルから exchange_order_id を取得する。
+
+        Args:
+          order_id: 内部 DB の注文 ID
+
+        Returns:
+          exchange_order_id 文字列、または None（行が存在しない・未設定の場合）
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT exchange_order_id FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()
+            return row["exchange_order_id"] if row else None
+
     def save_config_snapshot(self, run_id: str, config: dict[str, Any]) -> None:
         """バックテスト実行時の設定スナップショットを保存する。
 
