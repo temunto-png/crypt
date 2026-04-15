@@ -335,21 +335,23 @@ class LiveEngine:
                 logger.warning("live engine: OHLCV データを取得できませんでした")
 
     async def _partial_fill_loop(self) -> None:
-        """PARTIAL 注文を定期ポーリングする無限ループ。"""
+        """SUBMITTED/PARTIAL 注文を定期ポーリングする無限ループ。"""
         while True:
             await asyncio.sleep(self._settings.partial_fill_poll_interval_sec)
-            await self._poll_partial_fills()
+            await self._poll_active_orders()
 
-    async def _poll_partial_fills(self) -> None:
-        """PARTIAL ステータスの注文を1件ずつ確認してハンドル。"""
+    async def _poll_active_orders(self) -> None:
+        """SUBMITTED / PARTIAL ステータスの注文を1件ずつ確認してハンドル。"""
         try:
             active_orders = self._storage.get_active_orders(self._settings.pair)
         except Exception:
             logger.exception("live engine: アクティブ注文の取得に失敗")
             return
 
-        partial_orders = [o for o in active_orders if o["status"] == "PARTIAL"]
-        for order in partial_orders:
+        orders_to_poll = [
+            o for o in active_orders if o["status"] in ("SUBMITTED", "PARTIAL")
+        ]
+        for order in orders_to_poll:
             try:
                 await self._executor.handle_partial_fill(
                     pair=self._settings.pair,
@@ -360,7 +362,7 @@ class LiveEngine:
                 )
             except Exception:
                 logger.exception(
-                    "live engine: PARTIAL 注文 (id=%s) のハンドルに失敗", order["id"]
+                    "live engine: 注文 (id=%s) のハンドルに失敗", order["id"]
                 )
 
     # ------------------------------------------------------------------

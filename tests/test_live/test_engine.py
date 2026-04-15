@@ -389,7 +389,7 @@ class TestRunOneBarSignal:
 
 
 # ------------------------------------------------------------------ #
-# _poll_partial_fills
+# _poll_active_orders
 # ------------------------------------------------------------------ #
 
 class TestPollPartialFills:
@@ -403,7 +403,7 @@ class TestPollPartialFills:
         )
         # get_active_orders が空を返す
         with patch.object(storage, "get_active_orders", return_value=[]):
-            await engine._poll_partial_fills()
+            await engine._poll_active_orders()
         mock_executor.handle_partial_fill.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -421,7 +421,7 @@ class TestPollPartialFills:
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
         with patch.object(storage, "get_active_orders", return_value=[partial_order]):
-            await engine._poll_partial_fills()
+            await engine._poll_active_orders()
 
         mock_executor.handle_partial_fill.assert_awaited_once_with(
             pair="btc_jpy",
@@ -432,10 +432,10 @@ class TestPollPartialFills:
         )
 
     @pytest.mark.asyncio
-    async def test_submitted_orders_not_handled(
+    async def test_submitted_orders_are_handled(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """SUBMITTED ステータスの注文は handle_partial_fill を呼ばない。"""
+        """SUBMITTED ステータスの注文も handle_partial_fill を呼ぶ。"""
         submitted_order = {
             "id": 10,
             "status": "SUBMITTED",
@@ -446,15 +446,58 @@ class TestPollPartialFills:
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
         with patch.object(storage, "get_active_orders", return_value=[submitted_order]):
-            await engine._poll_partial_fills()
+            await engine._poll_active_orders()
 
-        mock_executor.handle_partial_fill.assert_not_awaited()
+        mock_executor.handle_partial_fill.assert_awaited_once_with(
+            pair="btc_jpy",
+            db_order_id=10,
+            exchange_order_id="EX_100",
+            created_at_iso="2024-01-01T09:00:00+09:00",
+            partial_fill_timeout_sec=settings.order_timeout_sec,
+        )
+
+    @pytest.mark.asyncio
+    async def test_submitted_order_fully_filled_transitions(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """SUBMITTED 注文が取引所で FULLY_FILLED の場合も handle_partial_fill を呼ぶ。"""
+        submitted_order = {
+            "id": 11,
+            "status": "SUBMITTED",
+            "exchange_order_id": "EX_200",
+            "created_at": "2024-01-01T10:00:00+09:00",
+        }
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[submitted_order]):
+            await engine._poll_active_orders()
+
+        mock_executor.handle_partial_fill.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_poll_active_orders_handles_both_statuses(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """SUBMITTED と PARTIAL が混在しても両方 handle_partial_fill を呼ぶ。"""
+        orders = [
+            {"id": 1, "status": "SUBMITTED", "exchange_order_id": "EX_1", "created_at": "2024-01-01T09:00:00+09:00"},
+            {"id": 2, "status": "PARTIAL",   "exchange_order_id": "EX_2", "created_at": "2024-01-01T09:30:00+09:00"},
+            {"id": 3, "status": "FILLED",    "exchange_order_id": "EX_3", "created_at": "2024-01-01T08:00:00+09:00"},
+        ]
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=orders):
+            await engine._poll_active_orders()
+
+        assert mock_executor.handle_partial_fill.await_count == 2
 
     @pytest.mark.asyncio
     async def test_handle_error_does_not_crash(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """handle_partial_fill が例外を送出しても _poll_partial_fills はクラッシュしない。"""
+        """handle_partial_fill が例外を送出しても _poll_active_orders はクラッシュしない。"""
         mock_executor.handle_partial_fill = AsyncMock(
             side_effect=RuntimeError("exchange error")
         )
@@ -468,7 +511,7 @@ class TestPollPartialFills:
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
         with patch.object(storage, "get_active_orders", return_value=[partial_order]):
-            await engine._poll_partial_fills()  # 例外が伝播しないこと
+            await engine._poll_active_orders()  # 例外が伝播しないこと
 
 
 # ------------------------------------------------------------------ #
