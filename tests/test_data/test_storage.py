@@ -646,3 +646,114 @@ class TestAuditLogTampering:
         with pytest.raises(sqlite3.IntegrityError, match="禁止"):
             conn.execute("DELETE FROM audit_log WHERE id = 1")
         conn.close()
+
+
+# ------------------------------------------------------------------ #
+# Phase4-A4: SUBMIT_FAILED ステータス + exclusive_transaction
+# ------------------------------------------------------------------ #
+
+class TestSubmitFailedStatus:
+    def _base_order(self) -> dict:
+        return {
+            "pair": "btc_jpy",
+            "side": "BUY",
+            "order_type": "limit",
+            "price": 5_000_000.0,
+            "size": 0.01,
+            "status": "CREATED",
+        }
+
+    def test_submit_failed_status_accepted(self, storage: Storage) -> None:
+        """insert_order() で status="SUBMIT_FAILED" が受け付けられること。"""
+        import sqlite3
+        order = {**self._base_order(), "status": "SUBMIT_FAILED"}
+        order_id = storage.insert_order(order)
+
+        conn = sqlite3.connect(storage._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
+        conn.close()
+        assert row["status"] == "SUBMIT_FAILED"
+
+    def test_submit_failed_transition_from_created(self, storage: Storage) -> None:
+        """update_order_status() で CREATED → SUBMIT_FAILED が許容されること。"""
+        import sqlite3
+        order_id = storage.insert_order(self._base_order())
+        storage.update_order_status(order_id, "SUBMIT_FAILED")
+
+        conn = sqlite3.connect(storage._db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
+        conn.close()
+        assert row["status"] == "SUBMIT_FAILED"
+
+    def test_submit_failed_is_terminal(self, storage: Storage) -> None:
+        """update_order_status() で SUBMIT_FAILED から任意の状態への遷移が ValueError になること。"""
+        order_id = storage.insert_order(self._base_order())
+        storage.update_order_status(order_id, "SUBMIT_FAILED")
+        with pytest.raises(ValueError, match="不正な状態遷移"):
+            storage.update_order_status(order_id, "CREATED")
+
+
+class TestExclusiveTransaction:
+    def _base_order(self) -> dict:
+        return {
+            "pair": "btc_jpy",
+            "side": "BUY",
+            "order_type": "limit",
+            "price": 5_000_000.0,
+            "size": 0.01,
+            "status": "CREATED",
+        }
+
+    def test_exclusive_transaction_commits(self, storage: Storage) -> None:
+        """exclusive_transaction() が正常終了時にコミットされること。"""
+        import sqlite3
+        from cryptbot.utils.time_utils import now_jst
+
+        now = now_jst().isoformat()
+        with storage.exclusive_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO orders
+                  (created_at, pair, side, order_type, price, size, status,
+                   exchange_order_id, fill_price, fill_size, fee, strategy, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (now, "btc_jpy", "BUY", "limit", 5_000_000.0, 0.01, "CREATED",
+                 None, None, None, None, None, now),
+            )
+
+        # コミットされていることを別接続で確認
+        verify_conn = sqlite3.connect(storage._db_path)
+        verify_conn.row_factory = sqlite3.Row
+        rows = verify_conn.execute("SELECT * FROM orders WHERE pair = 'btc_jpy'").fetchall()
+        verify_conn.close()
+        assert len(rows) == 1
+
+    def test_exclusive_transaction_rollback(self, storage: Storage) -> None:
+        """exclusive_transaction() が例外発生時にロールバックされること。"""
+        import sqlite3
+        from cryptbot.utils.time_utils import now_jst
+
+        now = now_jst().isoformat()
+        with pytest.raises(RuntimeError, match="test error"):
+            with storage.exclusive_transaction() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO orders
+                      (created_at, pair, side, order_type, price, size, status,
+                       exchange_order_id, fill_price, fill_size, fee, strategy, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (now, "btc_jpy", "BUY", "limit", 5_000_000.0, 0.01, "CREATED",
+                     None, None, None, None, None, now),
+                )
+                raise RuntimeError("test error")
+
+        # ロールバックされていることを確認
+        verify_conn = sqlite3.connect(storage._db_path)
+        verify_conn.row_factory = sqlite3.Row
+        rows = verify_conn.execute("SELECT * FROM orders WHERE pair = 'btc_jpy'").fetchall()
+        verify_conn.close()
+        assert len(rows) == 0

@@ -1,29 +1,22 @@
 """cryptbot エントリーポイント。
 
 paper モードは 1 バー処理して終了する（cron 呼び出し前提）。
-live モードは未実装のため fail-closed で終了する。
+live モードは asyncio 永続プロセスとして動作する。
 
 使用例:
   python -m cryptbot.main --help
-  python -m cryptbot.main             # paper モードで 1 バー処理
-  python -m cryptbot.main --mode live # LiveTradingNotImplementedError で終了
+  python -m cryptbot.main                                   # paper モードで 1 バー処理
+  python -m cryptbot.main --mode live --confirm-live        # live モードで起動
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-class LiveTradingNotImplementedError(RuntimeError):
-    """live トレードが未実装であることを示すエラー。
-
-    このエラーが発生した場合、実資金は一切使用されない。
-    Phase 2（paper engine）完了後に live 移行条件を満たしてから実装する。
-    """
 
 
 # 戦略名 → クラスのマッピング（eval / 動的 import を使わない）
@@ -51,10 +44,7 @@ def _resolve_strategy(name: str):
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cryptbot",
-        description=(
-            "cryptbot - BTC/JPY 自動売買システム\n\n"
-            "【警告】live モードは未実装です。実資金による取引は行えません。"
-        ),
+        description="cryptbot - BTC/JPY 自動売買システム",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -67,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--confirm-live",
         action="store_true",
         dest="confirm_live",
-        help="live モードの実行を確認するフラグ（現在未有効）",
+        help="live モードの実行を明示的に確認するフラグ（--mode live と同時に必要）",
     )
     parser.add_argument(
         "--db",
@@ -157,6 +147,93 @@ def _run_paper(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_live(args: argparse.Namespace) -> int:
+    """live モードで asyncio 永続プロセスとして動作する。"""
+    from cryptbot.config.settings import load_settings
+    from cryptbot.data.storage import Storage
+    from cryptbot.exchanges.bitbank_private import BitbankPrivateExchange
+    from cryptbot.execution.live_executor import LiveExecutor
+    from cryptbot.live.engine import LiveEngine
+    from cryptbot.live.gate import LiveGateError, phase_4_gate, verify_api_permissions
+    from cryptbot.live.state import LiveStateStore
+    from cryptbot.risk.kill_switch import KillSwitch
+    from cryptbot.risk.manager import RiskManager
+
+    settings = load_settings()
+
+    db_path = Path(args.db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    data_dir = Path(args.data_dir)
+
+    storage = Storage(db_path=db_path, data_dir=data_dir)
+    storage.initialize()
+
+    kill_switch = KillSwitch(storage)
+
+    # fail-closed ゲートチェック（4 条件を全て検証）
+    try:
+        phase_4_gate(settings, args.confirm_live, kill_switch)
+    except LiveGateError as exc:
+        print(f"[ERROR] live ゲートチェック失敗: {exc}", file=sys.stderr)
+        return 1
+
+    # 取引所インスタンス生成
+    api_key = settings.bitbank_api_key.get_secret_value()
+    api_secret = settings.bitbank_api_secret.get_secret_value()
+    exchange = BitbankPrivateExchange(api_key=api_key, api_secret=api_secret)
+
+    # コンポーネント組み立て
+    risk_manager = RiskManager(
+        settings=settings.circuit_breaker,
+        cvar_settings=settings.cvar,
+        kill_switch=kill_switch,
+    )
+    strategy = _resolve_strategy(settings.live.strategy_name)
+
+    state_store = LiveStateStore(storage)
+    state_store.initialize()
+
+    executor = LiveExecutor(
+        exchange=exchange,
+        storage=storage,
+        strategy_name=settings.live.strategy_name,
+    )
+
+    engine = LiveEngine(
+        strategy=strategy,
+        risk_manager=risk_manager,
+        state_store=state_store,
+        storage=storage,
+        executor=executor,
+        settings=settings.live,
+    )
+
+    async def _live_async() -> None:
+        """API 疎通確認後にエンジンを起動する（単一イベントループ）。"""
+        try:
+            assets = await verify_api_permissions(exchange)
+        except LiveGateError as exc:
+            print(f"[ERROR] API 疎通確認失敗: {exc}", file=sys.stderr)
+            raise
+
+        jpy = assets.get("jpy", 0.0)
+        btc = assets.get("btc", 0.0)
+        print(
+            f"[INFO] API 疎通確認完了: JPY={jpy:.0f}  BTC={btc:.6f}  "
+            f"pair={settings.live.pair}  tf={settings.live.timeframe}"
+        )
+
+        await engine.run()
+
+    try:
+        asyncio.run(_live_async())
+    except LiveGateError:
+        return 1
+    except KeyboardInterrupt:
+        print("[INFO] シャットダウン完了")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """cryptbot のエントリーポイント。
 
@@ -166,18 +243,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    # live モードは常に fail-closed
-    if args.mode == "live" or args.confirm_live:
-        print(
-            "[ERROR] live トレードは未実装です。\n"
-            "  Phase 2（paper engine）の完了と live 移行条件チェックが必要です。\n"
-            "  README.md の「Live 移行条件チェックリスト」を参照してください。",
-            file=sys.stderr,
-        )
-        raise LiveTradingNotImplementedError(
-            "Live trading is not implemented. "
-            "Complete Phase 2 (paper engine) and satisfy all live gate conditions first."
-        )
+    if args.mode == "live":
+        return _run_live(args)
 
     return _run_paper(args)
 
