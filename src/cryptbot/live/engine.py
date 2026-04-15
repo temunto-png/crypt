@@ -1,0 +1,512 @@
+"""Live trading エンジン（Phase 4）。
+
+asyncio 永続プロセスとして動作する。cron からは呼ばない。
+- バーループ: 次のバー境界まで待機 → 1バー処理
+- PARTIAL_FILLED ポーラー: 定期的にアクティブな PARTIAL 注文を確認
+
+起動方法:
+    asyncio.run(engine.run())
+"""
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+import pandas as pd
+
+from cryptbot.backtest.engine import (
+    TradeRecord,
+    _extract_timestamp,
+    apply_ml_filter,
+    apply_regime_override,
+    calc_mark_balance,
+    calc_trade_record,
+)
+
+if TYPE_CHECKING:
+    from cryptbot.models.base import BaseMLModel
+    from cryptbot.models.degradation_detector import DegradationDetector
+from cryptbot.config.settings import LiveSettings
+from cryptbot.data.storage import Storage
+from cryptbot.execution.live_executor import DuplicateOrderError, LiveExecutor
+from cryptbot.live.state import LiveState, LiveStateStore
+from cryptbot.risk.manager import PortfolioState, RiskManager
+from cryptbot.strategies.base import BaseStrategy, Direction, Signal
+from cryptbot.strategies.regime import RegimeDetector
+from cryptbot.utils.time_utils import JST, now_jst
+
+logger = logging.getLogger(__name__)
+
+_MAX_RECENT_RETURNS = 50
+
+# タイムフレーム文字列 → 秒数マッピング
+_TIMEFRAME_SECONDS: dict[str, int] = {
+    "1min": 60,
+    "5min": 300,
+    "15min": 900,
+    "30min": 1800,
+    "1hour": 3600,
+    "4hour": 14400,
+    "8hour": 28800,
+    "12hour": 43200,
+    "1day": 86400,
+}
+
+
+@dataclass
+class LiveRunResult:
+    """run_one_bar() の実行結果。"""
+
+    bar_timestamp: datetime
+    signal: Signal | None
+    order_submitted: bool   # この呼び出しで注文を発行したか
+    portfolio: PortfolioState
+    cvar_action: str
+    skipped: bool = False
+    skip_reason: str = ""
+
+
+class LiveEngine:
+    """Live trading エンジン（asyncio 永続プロセス）。
+
+    使用前に phase_4_gate() で起動条件を確認すること。
+    直接インスタンス化せず、main._run_live() 経由で使用する。
+    """
+
+    TAKER_FEE_PCT = 0.001
+    MIN_BTC_ORDER = 0.0001
+
+    def __init__(
+        self,
+        strategy: BaseStrategy,
+        risk_manager: RiskManager,
+        state_store: LiveStateStore,
+        storage: Storage,
+        executor: LiveExecutor,
+        settings: LiveSettings,
+        regime_detector: RegimeDetector | None = None,
+        ml_model: "BaseMLModel | None" = None,
+        degradation_detector: "DegradationDetector | None" = None,
+        ml_confidence_threshold: float = 0.6,
+    ) -> None:
+        self._strategy = strategy
+        self._risk_manager = risk_manager
+        self._state_store = state_store
+        self._storage = storage
+        self._executor = executor
+        self._settings = settings
+        self._regime_detector = regime_detector
+        self._ml_model = ml_model
+        self._degradation_detector = degradation_detector
+        self._ml_confidence_threshold = ml_confidence_threshold
+
+    # ------------------------------------------------------------------
+    # パブリック API
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """メインループ。asyncio.run(engine.run()) から呼ぶ。
+
+        KeyboardInterrupt / asyncio.CancelledError で graceful shutdown。
+        bar_loop または partial_fill_loop が例外を送出した場合は両タスクを停止して伝播。
+        """
+        bar_task = asyncio.create_task(self._bar_loop(), name="bar_loop")
+        partial_task = asyncio.create_task(
+            self._partial_fill_loop(), name="partial_fill_loop"
+        )
+
+        try:
+            done, _ = await asyncio.wait(
+                {bar_task, partial_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            # 完了したタスクに例外があれば再送出
+            for t in done:
+                if not t.cancelled() and t.exception() is not None:
+                    raise t.exception()  # type: ignore[misc]
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            logger.info("LiveEngine: シャットダウン要求を受信")
+
+        finally:
+            bar_task.cancel()
+            partial_task.cancel()
+            await asyncio.gather(bar_task, partial_task, return_exceptions=True)
+            logger.info("LiveEngine: 終了")
+
+    async def run_one_bar(self, data: pd.DataFrame) -> LiveRunResult:
+        """最新バー 1 本分を処理して状態を保存する。
+
+        外部（テスト・bar_loop）から呼ばれるメインロジック。
+
+        Args:
+            data: ウォームアップ分を含む OHLCV DataFrame。
+                  data.iloc[-1] が今回処理する最新バー。
+                  最低 (warmup_bars + 1) 本が必要。
+
+        Returns:
+            LiveRunResult（skipped=True の場合は同一バーの二重処理）
+        """
+        if len(data) == 0:
+            return LiveRunResult(
+                bar_timestamp=now_jst(),
+                signal=None,
+                order_submitted=False,
+                portfolio=self._make_initial_portfolio(0.0),
+                cvar_action="normal",
+                skipped=True,
+                skip_reason="empty_data",
+            )
+
+        current_bar = data.iloc[-1]
+        current_bar_ts = _extract_timestamp(current_bar)
+        current_date = current_bar_ts.date()
+
+        # ---- 状態を復元 ----
+        live_state = self._state_store.load()
+        if live_state is None:
+            portfolio, pending_signal, pending_cvar_action, recent_returns, entry_time, entry_price = (
+                self._init_fresh_state()
+            )
+        else:
+            # 同一バーの二重処理防止
+            if live_state.last_processed_bar_ts is not None:
+                try:
+                    last_ts = datetime.fromisoformat(live_state.last_processed_bar_ts)
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.replace(tzinfo=JST)
+                    if last_ts == current_bar_ts:
+                        logger.info(
+                            "live engine: 同一バー (%s) は処理済みのためスキップ", current_bar_ts
+                        )
+                        return LiveRunResult(
+                            bar_timestamp=current_bar_ts,
+                            signal=None,
+                            order_submitted=False,
+                            portfolio=LiveStateStore.to_portfolio_state(live_state),
+                            cvar_action=live_state.pending_cvar_action,
+                            skipped=True,
+                            skip_reason="already_processed",
+                        )
+                except ValueError:
+                    pass
+
+            portfolio = LiveStateStore.to_portfolio_state(live_state)
+            pending_signal = LiveStateStore.extract_pending_signal(live_state)
+            pending_cvar_action = live_state.pending_cvar_action
+            recent_returns = LiveStateStore.extract_recent_returns(live_state)
+            entry_time = LiveStateStore.extract_position_entry_time(live_state)
+            entry_price = live_state.position_entry_price
+
+        # ---- Kill switch チェック ----
+        if self._risk_manager._kill_switch.active:
+            logger.warning("live engine: kill switch が active のためスキップ")
+            self._save_state(
+                portfolio, None, "normal", recent_returns,
+                entry_time, entry_price, current_bar_ts,
+            )
+            return LiveRunResult(
+                bar_timestamp=current_bar_ts,
+                signal=None,
+                order_submitted=False,
+                portfolio=portfolio,
+                cvar_action="normal",
+                skipped=True,
+                skip_reason="kill_switch_active",
+            )
+
+        close_price = float(current_bar["close"])
+        order_submitted = False
+
+        # ---- 前回バーの pending_signal を今バーの open 価格で発注 ----
+        if pending_signal is not None:
+            order_submitted = await self._submit_pending(
+                pending_signal=pending_signal,
+                cvar_action=pending_cvar_action,
+                current_bar_ts=current_bar_ts,
+            )
+
+        # ---- per-bar リスク制御: max_trade_loss ----
+        if portfolio.position_size != 0.0:
+            if self._risk_manager.check_max_trade_loss(portfolio, close_price):
+                logger.debug(
+                    "max_trade_loss 超過: entry=%.0f current=%.0f → 翌バー強制クローズ",
+                    portfolio.entry_price,
+                    close_price,
+                )
+                new_pending = Signal(
+                    direction=Direction.SELL,
+                    confidence=1.0,
+                    reason="max_trade_loss_exceeded",
+                    timestamp=current_bar_ts,
+                )
+                mark_bal = calc_mark_balance(portfolio, close_price, self.TAKER_FEE_PCT, 0.0)
+                self._risk_manager.check_circuit_breakers(portfolio, mark_bal)
+                self._save_state(
+                    portfolio, new_pending, "normal", recent_returns,
+                    entry_time, entry_price, current_bar_ts,
+                )
+                return LiveRunResult(
+                    bar_timestamp=current_bar_ts,
+                    signal=new_pending,
+                    order_submitted=order_submitted,
+                    portfolio=portfolio,
+                    cvar_action="normal",
+                )
+
+        # ---- per-bar リスク制御: circuit breakers ----
+        mark_balance = calc_mark_balance(portfolio, close_price, self.TAKER_FEE_PCT, 0.0)
+        self._risk_manager.check_circuit_breakers(portfolio, mark_balance)
+
+        if self._risk_manager._kill_switch.active:
+            self._save_state(
+                portfolio, None, "normal", recent_returns,
+                entry_time, entry_price, current_bar_ts,
+            )
+            return LiveRunResult(
+                bar_timestamp=current_bar_ts,
+                signal=None,
+                order_submitted=order_submitted,
+                portfolio=portfolio,
+                cvar_action="normal",
+            )
+
+        # ---- シグナル生成 ----
+        new_signal = self._strategy.generate_signal(data)
+
+        # ---- レジームオーバーライド ----
+        new_signal = apply_regime_override(
+            new_signal, data, portfolio, current_bar_ts, self._regime_detector
+        )
+
+        # ---- ML フィルター ----
+        new_signal = apply_ml_filter(
+            new_signal, data, current_bar_ts,
+            self._ml_model, self._degradation_detector,
+            self._ml_confidence_threshold,
+        )
+
+        # ---- CVaR フィルター ----
+        cvar_action = "normal"
+        if new_signal.direction == Direction.BUY:
+            cvar_action = self._risk_manager.get_cvar_action(recent_returns)
+            if cvar_action == "stop" or self._risk_manager._kill_switch.active:
+                new_signal = Signal(
+                    direction=Direction.HOLD,
+                    confidence=0.0,
+                    reason=f"cvar_block:{cvar_action}",
+                    timestamp=current_bar_ts,
+                )
+
+        # ---- audit log にシグナルを記録 ----
+        self._record_signal(new_signal, portfolio)
+
+        # ---- 状態を保存（HOLD は pending に積まない） ----
+        pending_to_save = new_signal if new_signal.direction != Direction.HOLD else None
+        self._save_state(
+            portfolio, pending_to_save, cvar_action, recent_returns,
+            entry_time, entry_price, current_bar_ts,
+        )
+
+        return LiveRunResult(
+            bar_timestamp=current_bar_ts,
+            signal=new_signal,
+            order_submitted=order_submitted,
+            portfolio=portfolio,
+            cvar_action=cvar_action,
+        )
+
+    # ------------------------------------------------------------------
+    # 非同期ループ（run() から起動）
+    # ------------------------------------------------------------------
+
+    async def _bar_loop(self) -> None:
+        """バー確定を待って run_one_bar() を呼ぶ無限ループ。"""
+        while True:
+            await self._wait_for_next_bar()
+            data = self._load_ohlcv()
+            if data is not None:
+                await self.run_one_bar(data)
+            else:
+                logger.warning("live engine: OHLCV データを取得できませんでした")
+
+    async def _partial_fill_loop(self) -> None:
+        """PARTIAL 注文を定期ポーリングする無限ループ。"""
+        while True:
+            await asyncio.sleep(self._settings.partial_fill_poll_interval_sec)
+            await self._poll_partial_fills()
+
+    async def _poll_partial_fills(self) -> None:
+        """PARTIAL ステータスの注文を1件ずつ確認してハンドル。"""
+        try:
+            active_orders = self._storage.get_active_orders(self._settings.pair)
+        except Exception:
+            logger.exception("live engine: アクティブ注文の取得に失敗")
+            return
+
+        partial_orders = [o for o in active_orders if o["status"] == "PARTIAL"]
+        for order in partial_orders:
+            try:
+                await self._executor.handle_partial_fill(
+                    pair=self._settings.pair,
+                    db_order_id=int(order["id"]),
+                    exchange_order_id=str(order.get("exchange_order_id", "")),
+                    created_at_iso=str(order["created_at"]),
+                    partial_fill_timeout_sec=self._settings.order_timeout_sec,
+                )
+            except Exception:
+                logger.exception(
+                    "live engine: PARTIAL 注文 (id=%s) のハンドルに失敗", order["id"]
+                )
+
+    # ------------------------------------------------------------------
+    # 内部ヘルパー
+    # ------------------------------------------------------------------
+
+    async def _submit_pending(
+        self,
+        pending_signal: Signal,
+        cvar_action: str,
+        current_bar_ts: datetime,
+    ) -> bool:
+        """pending_signal を取引所に発注する。
+
+        Returns:
+            True: 発注成功。False: 発注スキップ（重複・サイズ不足等）。
+        """
+        pair = self._settings.pair
+
+        if pending_signal.direction == Direction.HOLD:
+            return False
+
+        side = "buy" if pending_signal.direction == Direction.BUY else "sell"
+
+        # サイズチェック（BUY のみ）
+        size = self._settings.min_order_size_btc  # 最小サイズで発注（RiskManager計算は今後）
+        if pending_signal.direction == Direction.BUY:
+            if size < self.MIN_BTC_ORDER:
+                logger.warning("live engine: 注文サイズが最小値未満のためスキップ (%.4f)", size)
+                return False
+
+        try:
+            result = await self._executor.place_order(
+                pair=pair,
+                side=side,
+                order_type="market",
+                size=size,
+            )
+            logger.info(
+                "live engine: 注文発行 pair=%s side=%s size=%.4f order_id=%s status=%s",
+                pair, side, size, result.order_id, result.status,
+            )
+            self._storage.insert_audit_log(
+                "order_submitted",
+                strategy=self._strategy.name,
+                direction=side.upper(),
+                signal_confidence=pending_signal.confidence,
+                signal_reason=pending_signal.reason,
+            )
+            return True
+
+        except DuplicateOrderError:
+            logger.warning(
+                "live engine: pair=%s に既存のアクティブ注文があるため発注をスキップ", pair
+            )
+            return False
+
+        except Exception:
+            logger.exception("live engine: 注文発行中に予期しないエラーが発生")
+            return False
+
+    def _load_ohlcv(self) -> pd.DataFrame | None:
+        """ウォームアップ込みの OHLCV データを Storage から取得する。"""
+        needed = self._settings.warmup_bars + 1
+        try:
+            data = self._storage.load_ohlcv(
+                pair=self._settings.pair,
+                timeframe=self._settings.timeframe,
+            )
+            if len(data) < needed:
+                logger.warning(
+                    "live engine: OHLCV データ不足 (%d/%d 本)", len(data), needed
+                )
+                return None
+            return data.tail(needed).reset_index(drop=True)
+        except Exception:
+            logger.exception("live engine: OHLCV データの読み込みに失敗")
+            return None
+
+    async def _wait_for_next_bar(self) -> None:
+        """次のバー境界（timeframe の次の :00）まで待機する。"""
+        tf_seconds = self._resolve_timeframe_seconds()
+        now_ts = now_jst().timestamp()
+        next_bar_ts = (now_ts // tf_seconds + 1) * tf_seconds
+        wait_seconds = next_bar_ts - now_ts
+        logger.debug("live engine: 次のバーまで %.1f 秒待機", wait_seconds)
+        await asyncio.sleep(wait_seconds)
+
+    def _resolve_timeframe_seconds(self) -> int:
+        """timeframe 文字列を秒数に変換する。未知の値は 3600 にフォールバック。"""
+        return _TIMEFRAME_SECONDS.get(self._settings.timeframe, 3600)
+
+    def _record_signal(self, signal: Signal, portfolio: PortfolioState) -> None:
+        """シグナルを audit_log に記録する。fail-open（エラーは無視）。"""
+        try:
+            self._storage.insert_audit_log(
+                "signal",
+                strategy=self._strategy.name,
+                direction=signal.direction.value,
+                signal_confidence=signal.confidence,
+                signal_reason=signal.reason,
+                portfolio_value=portfolio.balance,
+            )
+        except Exception:
+            logger.exception("live engine: シグナル記録中にエラーが発生しました")
+
+    def _save_state(
+        self,
+        portfolio: PortfolioState,
+        pending_signal: Signal | None,
+        pending_cvar_action: str,
+        recent_returns: list[float],
+        entry_time: datetime | None,
+        entry_price: float,
+        bar_ts: datetime,
+    ) -> None:
+        state = LiveStateStore.from_portfolio_state(
+            portfolio=portfolio,
+            pending_signal=pending_signal,
+            pending_cvar_action=pending_cvar_action,
+            recent_trade_returns=recent_returns,
+            position_entry_time=entry_time,
+            position_entry_price=entry_price,
+            last_processed_bar_ts=bar_ts,
+        )
+        self._state_store.save(state)
+
+    def _make_initial_portfolio(self, balance: float) -> PortfolioState:
+        today = now_jst().date()
+        return PortfolioState(
+            balance=balance,
+            peak_balance=balance,
+            position_size=0.0,
+            entry_price=0.0,
+            daily_loss=0.0,
+            weekly_loss=0.0,
+            monthly_loss=0.0,
+            consecutive_losses=0,
+            last_reset_date=today,
+            last_weekly_reset=today,
+            last_monthly_reset=today,
+        )
+
+    def _init_fresh_state(
+        self,
+    ) -> tuple[PortfolioState, Signal | None, str, list[float], datetime | None, float]:
+        """初回起動時の状態を生成する。残高は 0 で初期化（起動時に別途同期）。"""
+        portfolio = self._make_initial_portfolio(0.0)
+        return portfolio, None, "normal", [], None, 0.0
