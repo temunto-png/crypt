@@ -2,7 +2,7 @@
 
 asyncio 永続プロセスとして動作する。cron からは呼ばない。
 - バーループ: 次のバー境界まで待機 → 1バー処理
-- PARTIAL_FILLED ポーラー: 定期的にアクティブな PARTIAL 注文を確認
+- アクティブ注文ポーラー: 定期的に SUBMITTED/PARTIAL 注文を確認
 
 起動方法:
     asyncio.run(engine.run())
