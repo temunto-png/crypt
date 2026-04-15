@@ -19,7 +19,7 @@ venv/
 env/
 
 # データ・ログ（生成物）
-reports/
+/reports/
 logs/
 *.db
 *.db-journal
