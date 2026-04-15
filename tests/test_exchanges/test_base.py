@@ -56,3 +56,8 @@ class TestGmoCoinExchangePrivateApi:
     async def test_get_open_orders_raises(self, gmo: GmoCoinExchange) -> None:
         with pytest.raises(NotImplementedError):
             await gmo.get_open_orders("btc_jpy")
+
+    @pytest.mark.asyncio
+    async def test_get_order_raises(self, gmo: GmoCoinExchange) -> None:
+        with pytest.raises(NotImplementedError):
+            await gmo.get_order("btc_jpy", "12345")

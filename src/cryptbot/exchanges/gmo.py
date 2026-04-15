@@ -47,3 +47,6 @@ class GmoCoinExchange(BaseExchange):
 
     async def get_open_orders(self, pair: str) -> list[dict]:
         raise NotImplementedError
+
+    async def get_order(self, pair: str, order_id: str) -> dict:
+        raise NotImplementedError("get_order is planned for Phase 4.")
