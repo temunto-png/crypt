@@ -794,3 +794,55 @@ class TestSubmitPendingSize:
 
         assert result is False
         engine_with_state._executor.place_order.assert_not_awaited()
+
+
+# ------------------------------------------------------------------ #
+# _record_signal: fail-closed (F7)
+# ------------------------------------------------------------------ #
+
+class TestRecordSignalFailClosed:
+    """_record_signal() の BUY fail-closed テスト。"""
+
+    def test_buy_signal_audit_failure_raises(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """BUY シグナルで insert_audit_log が失敗すると例外が再 raise される。"""
+        from cryptbot.utils.time_utils import JST
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        portfolio = _make_portfolio()
+        buy_signal = Signal(Direction.BUY, 1.0, "test", datetime.now(JST))
+
+        with patch.object(storage, "insert_audit_log", side_effect=RuntimeError("DB error")):
+            with pytest.raises(RuntimeError, match="DB error"):
+                engine._record_signal(buy_signal, portfolio)
+
+    def test_sell_signal_audit_failure_is_silenced(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """SELL シグナルで insert_audit_log が失敗しても例外は握り潰される。"""
+        from cryptbot.utils.time_utils import JST
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        portfolio = _make_portfolio()
+        sell_signal = Signal(Direction.SELL, 1.0, "test", datetime.now(JST))
+
+        with patch.object(storage, "insert_audit_log", side_effect=RuntimeError("DB error")):
+            # 例外が出ないこと
+            engine._record_signal(sell_signal, portfolio)
+
+    def test_hold_signal_audit_failure_is_silenced(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """HOLD シグナルで insert_audit_log が失敗しても例外は握り潰される。"""
+        from cryptbot.utils.time_utils import JST
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        portfolio = _make_portfolio()
+        hold_signal = Signal(Direction.HOLD, 0.0, "test", datetime.now(JST))
+
+        with patch.object(storage, "insert_audit_log", side_effect=RuntimeError("DB error")):
+            engine._record_signal(hold_signal, portfolio)

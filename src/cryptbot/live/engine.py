@@ -483,7 +483,11 @@ class LiveEngine:
         return _TIMEFRAME_SECONDS.get(self._settings.timeframe, 3600)
 
     def _record_signal(self, signal: Signal, portfolio: PortfolioState) -> None:
-        """シグナルを audit_log に記録する。fail-open（エラーは無視）。"""
+        """シグナルを audit_log に記録する。
+
+        BUY シグナルの場合のみ fail-closed（例外を再 raise）。
+        SELL / HOLD は fail-open（取引継続を優先）。
+        """
         try:
             self._storage.insert_audit_log(
                 "signal",
@@ -495,6 +499,8 @@ class LiveEngine:
             )
         except Exception:
             logger.exception("live engine: シグナル記録中にエラーが発生しました")
+            if signal.direction == Direction.BUY:
+                raise  # BUY 前の証跡欠落は取引停止
 
     def _save_state(
         self,
