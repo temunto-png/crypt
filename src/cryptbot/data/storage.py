@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,38 @@ class Storage:
         conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
+    @contextmanager
+    def exclusive_transaction(self):
+        """BEGIN EXCLUSIVE トランザクションコンテキストマネージャー。
+
+        TOC/TOU レース条件防止用。通常の _connect() は BEGIN DEFERRED を使うため、
+        このメソッドで明示的に EXCLUSIVE ロックを取得する。
+        LiveExecutor の二重発注防止チェック（アクティブ注文確認 + CREATED 挿入の原子性）に使用。
+
+        Yields:
+            sqlite3.Connection（commit/rollback は自動）
+
+        Example:
+            with storage.exclusive_transaction() as conn:
+                active = conn.execute(...).fetchall()
+                if active:
+                    raise DuplicateOrderError(...)
+                conn.execute("INSERT INTO orders ...")
+        """
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("BEGIN EXCLUSIVE")
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def initialize(self) -> None:
         """テーブル作成（存在しない場合のみ）。ディレクトリも作成する。
         既存 DB に audit_log.record_hash カラムが存在しない場合は追加する（マイグレーション）。
@@ -190,7 +223,7 @@ class Storage:
                   price             REAL,
                   size              REAL NOT NULL,
                   status            TEXT NOT NULL
-                    CHECK(status IN ('CREATED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'FAILED')),
+                    CHECK(status IN ('CREATED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'FAILED', 'SUBMIT_FAILED')),
                   exchange_order_id TEXT,
                   fill_price        REAL,
                   fill_size         REAL,
@@ -262,6 +295,42 @@ class Storage:
                 conn.execute(
                     "ALTER TABLE ohlcv_metadata ADD COLUMN fetch_timestamp TEXT"
                 )
+
+            # マイグレーション: orders テーブルに SUBMIT_FAILED を status CHECK 制約に追加
+            orders_schema = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'"
+            ).fetchone()
+            if orders_schema and orders_schema[0] and "SUBMIT_FAILED" not in orders_schema[0]:
+                conn.executescript("""
+                    ALTER TABLE orders RENAME TO _orders_migration_backup;
+
+                    CREATE TABLE orders (
+                      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                      created_at        TEXT NOT NULL,
+                      pair              TEXT NOT NULL,
+                      side              TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+                      order_type        TEXT NOT NULL,
+                      price             REAL,
+                      size              REAL NOT NULL,
+                      status            TEXT NOT NULL
+                        CHECK(status IN ('CREATED', 'SUBMITTED', 'PARTIAL', 'FILLED', 'CANCELLED', 'FAILED', 'SUBMIT_FAILED')),
+                      exchange_order_id TEXT,
+                      fill_price        REAL,
+                      fill_size         REAL,
+                      fee               REAL,
+                      strategy          TEXT,
+                      updated_at        TEXT NOT NULL
+                    );
+
+                    INSERT INTO orders SELECT * FROM _orders_migration_backup;
+
+                    DROP TABLE _orders_migration_backup;
+
+                    DROP INDEX IF EXISTS orders_active_unique;
+                    CREATE UNIQUE INDEX IF NOT EXISTS orders_active_unique
+                      ON orders(pair)
+                      WHERE status IN ('CREATED', 'SUBMITTED', 'PARTIAL');
+                """)
 
     # ------------------------------------------------------------------ #
     # OHLCV
@@ -651,16 +720,17 @@ class Storage:
 
     # 許容される状態遷移マップ
     _VALID_STATUS_TRANSITIONS: dict[str, set[str]] = {
-        "CREATED":   {"SUBMITTED", "CANCELLED", "FAILED"},
-        "SUBMITTED": {"PARTIAL", "FILLED", "CANCELLED", "FAILED"},
-        "PARTIAL":   {"FILLED", "CANCELLED", "FAILED"},
-        "FILLED":    set(),       # 終端状態
-        "CANCELLED": set(),       # 終端状態
-        "FAILED":    set(),       # 終端状態
+        "CREATED":      {"SUBMITTED", "CANCELLED", "FAILED", "SUBMIT_FAILED"},
+        "SUBMITTED":    {"PARTIAL", "FILLED", "CANCELLED", "FAILED"},
+        "PARTIAL":      {"FILLED", "CANCELLED", "FAILED"},
+        "FILLED":       set(),       # 終端状態
+        "CANCELLED":    set(),       # 終端状態
+        "FAILED":       set(),       # 終端状態
+        "SUBMIT_FAILED": set(),      # 終端状態
     }
 
     _VALID_STATUSES: frozenset[str] = frozenset(
-        {"CREATED", "SUBMITTED", "PARTIAL", "FILLED", "CANCELLED", "FAILED"}
+        {"CREATED", "SUBMITTED", "PARTIAL", "FILLED", "CANCELLED", "FAILED", "SUBMIT_FAILED"}
     )
 
     def update_order_status(
