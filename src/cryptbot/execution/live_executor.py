@@ -140,6 +140,7 @@ class LiveExecutor(BaseExecutor):
         if exchange_order_id is None:
             # 未送信または送信失敗: ローカルのみ更新
             self._storage.update_order_status(db_order_id, "CANCELLED")
+            self._storage.insert_order_event(db_order_id, "CANCELLED")
             return True
 
         try:
