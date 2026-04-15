@@ -137,6 +137,10 @@ class Storage:
         Yields:
             sqlite3.Connection（commit/rollback は自動）
 
+        Raises:
+            sqlite3.OperationalError: ロック取得に3秒以内に失敗した場合。
+                呼び出し元でキャッチして SUBMIT_FAILED に遷移させること。
+
         Example:
             with storage.exclusive_transaction() as conn:
                 active = conn.execute(...).fetchall()
@@ -144,7 +148,7 @@ class Storage:
                     raise DuplicateOrderError(...)
                 conn.execute("INSERT INTO orders ...")
         """
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=3.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -244,7 +248,7 @@ class Storage:
                   order_id   INTEGER NOT NULL REFERENCES orders(id),
                   created_at TEXT NOT NULL,
                   event_type TEXT NOT NULL
-                    CHECK(event_type IN ('SUBMITTED', 'PARTIAL_FILL', 'FILLED', 'CANCELLED', 'FAILED', 'ERROR')),
+                    CHECK(event_type IN ('SUBMITTED', 'PARTIAL_FILL', 'FILLED', 'CANCELLED', 'FAILED', 'SUBMIT_FAILED', 'ERROR')),
                   fill_price REAL,
                   fill_size  REAL,
                   fee        REAL,
@@ -297,6 +301,17 @@ class Storage:
                 )
 
             # マイグレーション: orders テーブルに SUBMIT_FAILED を status CHECK 制約に追加
+            # まず前回マイグレーションの残骸を検出してフェイルファスト
+            backup_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='_orders_migration_backup'"
+            ).fetchone()
+            if backup_exists:
+                raise RuntimeError(
+                    "_orders_migration_backup テーブルが残存しています。"
+                    "前回の orders テーブルマイグレーションが途中で中断した可能性があります。"
+                    "DB の整合性を手動で確認してから _orders_migration_backup を削除してください。"
+                )
+
             orders_schema = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'"
             ).fetchone()
@@ -802,7 +817,7 @@ class Storage:
 
         Args:
           order_id: 対象の注文 ID
-          event_type: イベント種別（SUBMITTED / PARTIAL_FILL / FILLED / CANCELLED / FAILED / ERROR）
+          event_type: イベント種別（SUBMITTED / PARTIAL_FILL / FILLED / CANCELLED / FAILED / SUBMIT_FAILED / ERROR）
           **kwargs: fill_price, fill_size, fee, note
 
         Returns:
