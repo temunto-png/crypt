@@ -25,6 +25,10 @@ logs/
 *.db-journal
 *.parquet
 
+# ML モデル（pkl ファイルはリポジトリに含めない）
+src/cryptbot/models/experiments/*.pkl
+src/cryptbot/models/experiments/**/*.pkl
+
 # テストカバレッジ
 .coverage
 .pytest_cache/
@@ -38,3 +42,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Git worktrees
+.worktrees/
