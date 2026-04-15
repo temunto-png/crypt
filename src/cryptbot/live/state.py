@@ -44,6 +44,7 @@ class LiveState:
     position_entry_time: str | None         # ISO8601, None = ノーポジション
     position_entry_price: float
     last_processed_bar_ts: str | None       # ISO8601, None = 初回実行
+    last_price: float                       # 最後に処理したバーの終値 [JPY]
 
     updated_at: str                         # ISO8601
 
@@ -77,6 +78,7 @@ class LiveStateStore:
             position_entry_time         TEXT,
             position_entry_price        REAL    NOT NULL DEFAULT 0.0,
             last_processed_bar_ts       TEXT,
+            last_price                  REAL    NOT NULL DEFAULT 0.0,
             updated_at                  TEXT    NOT NULL
         )
     """
@@ -88,6 +90,12 @@ class LiveStateStore:
         """live_state テーブルを作成する。Storage.initialize() 後に呼ぶ。"""
         with self._storage._connect() as conn:
             conn.execute(self._CREATE_TABLE)
+            # マイグレーション: 既存 DB に last_price カラムを追加
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(live_state)").fetchall()}
+            if "last_price" not in cols:
+                conn.execute(
+                    "ALTER TABLE live_state ADD COLUMN last_price REAL NOT NULL DEFAULT 0.0"
+                )
 
     def load(self) -> LiveState | None:
         """保存済み状態を返す。未保存の場合は None。"""
@@ -114,7 +122,7 @@ class LiveStateStore:
                     pending_signal_reason, pending_signal_ts,
                     pending_cvar_action, recent_trade_returns,
                     position_entry_time, position_entry_price,
-                    last_processed_bar_ts, updated_at
+                    last_processed_bar_ts, last_price, updated_at
                 ) VALUES (
                     :id, :balance, :peak_balance, :position_size, :entry_price,
                     :daily_loss, :weekly_loss, :monthly_loss, :consecutive_losses,
@@ -123,7 +131,7 @@ class LiveStateStore:
                     :pending_signal_reason, :pending_signal_ts,
                     :pending_cvar_action, :recent_trade_returns,
                     :position_entry_time, :position_entry_price,
-                    :last_processed_bar_ts, :updated_at
+                    :last_processed_bar_ts, :last_price, :updated_at
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     balance                   = excluded.balance,
@@ -146,6 +154,7 @@ class LiveStateStore:
                     position_entry_time       = excluded.position_entry_time,
                     position_entry_price      = excluded.position_entry_price,
                     last_processed_bar_ts     = excluded.last_processed_bar_ts,
+                    last_price                = excluded.last_price,
                     updated_at                = excluded.updated_at
                 """,
                 {
@@ -170,6 +179,7 @@ class LiveStateStore:
                     "position_entry_time": state.position_entry_time,
                     "position_entry_price": state.position_entry_price,
                     "last_processed_bar_ts": state.last_processed_bar_ts,
+                    "last_price": state.last_price,
                     "updated_at": state.updated_at,
                 },
             )
@@ -204,6 +214,7 @@ class LiveStateStore:
         position_entry_time: datetime | None,
         position_entry_price: float,
         last_processed_bar_ts: datetime | None,
+        last_price: float = 0.0,
     ) -> LiveState:
         """PortfolioState + live 固有フィールドから LiveState を組み立てる。"""
         if pending_signal is not None:
@@ -241,6 +252,7 @@ class LiveStateStore:
             position_entry_time=entry_ts_str,
             position_entry_price=position_entry_price,
             last_processed_bar_ts=bar_ts_str,
+            last_price=last_price,
             updated_at=now_jst().isoformat(),
         )
 

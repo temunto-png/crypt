@@ -252,6 +252,82 @@ class TestExtractRecentReturns:
         assert LiveStateStore.extract_recent_returns(state) == []
 
 
+class TestLastPrice:
+    def test_last_price_roundtrip(self, store: LiveStateStore) -> None:
+        """last_price が save/load でラウンドトリップする。"""
+        state = LiveStateStore.from_portfolio_state(
+            portfolio=_make_portfolio(),
+            pending_signal=None,
+            pending_cvar_action="normal",
+            recent_trade_returns=[],
+            position_entry_time=None,
+            position_entry_price=0.0,
+            last_processed_bar_ts=None,
+            last_price=5_500_000.0,
+        )
+        store.save(state)
+        loaded = store.load()
+
+        assert loaded is not None
+        assert loaded.last_price == 5_500_000.0
+
+    def test_last_price_default_zero(self, store: LiveStateStore) -> None:
+        """last_price 引数省略時は 0.0 になる。"""
+        state = LiveStateStore.from_portfolio_state(
+            portfolio=_make_portfolio(),
+            pending_signal=None,
+            pending_cvar_action="normal",
+            recent_trade_returns=[],
+            position_entry_time=None,
+            position_entry_price=0.0,
+            last_processed_bar_ts=None,
+        )
+        store.save(state)
+        loaded = store.load()
+
+        assert loaded is not None
+        assert loaded.last_price == 0.0
+
+    def test_migration_adds_last_price_column(self, storage: Storage) -> None:
+        """既存 DB に last_price カラムがなくても initialize() でマイグレーションされる。"""
+        # まず last_price なしのテーブルを作る
+        with storage._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS live_state (
+                    id INTEGER PRIMARY KEY,
+                    balance REAL NOT NULL,
+                    peak_balance REAL NOT NULL,
+                    position_size REAL NOT NULL DEFAULT 0.0,
+                    entry_price REAL NOT NULL DEFAULT 0.0,
+                    daily_loss REAL NOT NULL DEFAULT 0.0,
+                    weekly_loss REAL NOT NULL DEFAULT 0.0,
+                    monthly_loss REAL NOT NULL DEFAULT 0.0,
+                    consecutive_losses INTEGER NOT NULL DEFAULT 0,
+                    last_reset_date TEXT NOT NULL,
+                    last_weekly_reset TEXT NOT NULL,
+                    last_monthly_reset TEXT NOT NULL,
+                    pending_signal_direction TEXT,
+                    pending_signal_confidence REAL,
+                    pending_signal_reason TEXT,
+                    pending_signal_ts TEXT,
+                    pending_cvar_action TEXT NOT NULL DEFAULT 'normal',
+                    recent_trade_returns TEXT NOT NULL DEFAULT '[]',
+                    position_entry_time TEXT,
+                    position_entry_price REAL NOT NULL DEFAULT 0.0,
+                    last_processed_bar_ts TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+        # initialize() でマイグレーションされること
+        store = LiveStateStore(storage)
+        store.initialize()
+
+        with storage._connect() as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(live_state)").fetchall()}
+        assert "last_price" in cols
+
+
 class TestExtractPositionEntryTime:
     def test_none_entry_time(self) -> None:
         state = LiveStateStore.from_portfolio_state(
