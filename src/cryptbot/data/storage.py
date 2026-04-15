@@ -861,6 +861,22 @@ class Storage:
     # config_snapshot
     # ------------------------------------------------------------------ #
 
+    def get_active_orders(self, pair: str) -> list[dict]:
+        """pair のアクティブ注文（CREATED/SUBMITTED/PARTIAL）を返す。
+
+        Args:
+            pair: 取引ペア（例: "btc_jpy"）
+
+        Returns:
+            アクティブ注文の dict リスト
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM orders WHERE pair = ? AND status IN ('CREATED', 'SUBMITTED', 'PARTIAL')",
+                (pair,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_order_exchange_id(self, order_id: int) -> str | None:
         """orders テーブルから exchange_order_id を取得する。
 

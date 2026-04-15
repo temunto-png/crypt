@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 
 from cryptbot.data.storage import Storage
@@ -59,37 +60,45 @@ class LiveExecutor(BaseExecutor):
         """
         # ステップ 1: EXCLUSIVE トランザクションで二重発注チェック + CREATED 挿入
         now_iso = datetime.now(tz=JST).isoformat()
-        with self._storage.exclusive_transaction() as conn:
-            active = conn.execute(
-                """
-                SELECT id FROM orders
-                WHERE pair = ? AND status IN ('CREATED', 'SUBMITTED', 'PARTIAL')
-                """,
-                (pair,),
-            ).fetchall()
-            if active:
-                raise DuplicateOrderError(
-                    f"pair={pair!r} にアクティブ注文が既に存在します（id={active[0]['id']}）。"
-                    " 二重発注を防止するためリクエストを拒否しました。"
+        try:
+            with self._storage.exclusive_transaction() as conn:
+                active = conn.execute(
+                    """
+                    SELECT id FROM orders
+                    WHERE pair = ? AND status IN ('CREATED', 'SUBMITTED', 'PARTIAL')
+                    """,
+                    (pair,),
+                ).fetchall()
+                if active:
+                    raise DuplicateOrderError(
+                        f"pair={pair!r} にアクティブ注文が既に存在します（id={active[0]['id']}）。"
+                        " 二重発注を防止するためリクエストを拒否しました。"
+                    )
+                cursor = conn.execute(
+                    """
+                    INSERT INTO orders
+                      (created_at, pair, side, order_type, price, size, status, strategy, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
+                    """,
+                    (
+                        now_iso,
+                        pair,
+                        side.upper(),
+                        order_type,
+                        price,
+                        size,
+                        self._strategy_name or None,
+                        now_iso,
+                    ),
                 )
-            cursor = conn.execute(
-                """
-                INSERT INTO orders
-                  (created_at, pair, side, order_type, price, size, status, strategy, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?)
-                """,
-                (
-                    now_iso,
-                    pair,
-                    side.upper(),
-                    order_type,
-                    price,
-                    size,
-                    self._strategy_name or None,
-                    now_iso,
-                ),
-            )
-            db_order_id: int = cursor.lastrowid  # type: ignore[assignment]
+                db_order_id: int = cursor.lastrowid  # type: ignore[assignment]
+        except DuplicateOrderError:
+            raise  # expected flow
+        except sqlite3.OperationalError as e:
+            # DB lock timeout — no order was created
+            raise RuntimeError(
+                f"注文の排他ロック取得に失敗しました（タイムアウト）: {sanitize_error(e)}"
+            ) from e
 
         # ステップ 2: 取引所に注文送信
         try:
@@ -156,19 +165,8 @@ class LiveExecutor(BaseExecutor):
             raise
 
     async def get_open_orders(self, pair: str) -> list[dict]:
-        """ローカル DB からアクティブ注文（CREATED/SUBMITTED/PARTIAL）を返す。
-
-        取引所への問い合わせは行わない。
-        """
-        with self._storage._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM orders
-                WHERE pair = ? AND status IN ('CREATED', 'SUBMITTED', 'PARTIAL')
-                """,
-                (pair,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        """pair のアクティブ注文を DB から返す（取引所 API 呼び出しなし）。"""
+        return self._storage.get_active_orders(pair)
 
     async def handle_partial_fill(
         self,
@@ -178,10 +176,12 @@ class LiveExecutor(BaseExecutor):
         created_at_iso: str,
         partial_fill_timeout_sec: int,
     ) -> None:
-        """PARTIAL_FILLED 注文の状態をポーリングして更新する。
+        """PARTIAL_FILLED 注文の状態を1回取得して更新する（ワンショット）。
 
-        取引所から現在の注文状態を取得し、FULLY_FILLED なら DB を FILLED に遷移。
-        タイムアウトを超えた場合は残量をキャンセルする。
+        LiveEngine のポーリングタスクから定期的に呼ばれる。
+        - 全量約定済み（FULLY_FILLED）→ DB を FILLED に遷移
+        - タイムアウト超過かつ未約定 → cancel_order() を呼び出し
+        - 上記以外 → 何もしない（次回ポーリング待ち）
 
         Args:
             pair: 取引ペア
@@ -193,6 +193,11 @@ class LiveExecutor(BaseExecutor):
         order_data = await self._exchange.get_order(pair, exchange_order_id)
         exchange_status = order_data.get("status", "")
 
+        # bitbank get_order レスポンスのフィールド名:
+        # status: "UNFILLED" | "PARTIALLY_FILLED" | "FULLY_FILLED" |
+        #         "CANCELED_UNFILLED" | "CANCELED_PARTIALLY_FILLED"
+        # executed_amount: 約定済み数量（文字列）
+        # average_price: 平均約定価格（文字列、未約定時は "0"）
         if exchange_status == "FULLY_FILLED":
             fill_amount = float(order_data.get("executed_amount", 0))
             avg_price = float(order_data.get("average_price", 0))
