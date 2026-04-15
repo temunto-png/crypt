@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-import math
+import math  # F3: _submit_pending() での BUY サイズ計算に使用
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -558,7 +558,7 @@ class LiveEngine:
             self._state_store.save(state)
             logger.info("live engine: 初回起動 balance=%.0f JPY", jpy)
         else:
-            if existing.balance > 0:
+            if existing.balance > 0:  # balance=0 の場合はゼロ除算を回避し無条件で上書き
                 diff_pct = abs(jpy - existing.balance) / existing.balance
                 if diff_pct > self._settings.balance_sync_tolerance_pct:
                     raise LiveGateError(
@@ -568,6 +568,8 @@ class LiveEngine:
                     )
             old_balance = existing.balance
             existing.balance = jpy
+            if jpy > existing.peak_balance:
+                existing.peak_balance = jpy
             existing.updated_at = now_jst().isoformat()
             self._state_store.save(existing)
             logger.info(

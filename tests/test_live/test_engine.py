@@ -638,3 +638,26 @@ class TestSyncInitialBalance:
         await engine._sync_initial_balance(None)
 
         assert state_store.load() is None
+
+    @pytest.mark.asyncio
+    async def test_restart_updates_peak_balance_if_higher(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に実残高が peak_balance を超える場合、peak_balance も更新される。"""
+        _seed_state(state_store, balance=1_000_000.0)
+        # peak_balance を balance と同じ値に設定
+        existing = state_store.load()
+        existing.peak_balance = 1_000_000.0
+        state_store.save(existing)
+
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        # balance=1_000_000 → jpy=1_000_500 (許容差内 0.05%)、peak より高い
+        assets = {"jpy": 1_000_500.0, "btc": 0.0}
+        await engine._sync_initial_balance(assets)
+
+        loaded = state_store.load()
+        assert loaded is not None
+        assert loaded.balance == 1_000_500.0
+        assert loaded.peak_balance == 1_000_500.0
