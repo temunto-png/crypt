@@ -50,6 +50,7 @@ EXPECTED_COLUMNS = [
     "bb_bandwidth",
     "momentum",
     "volume_ma_ratio",
+    "adx",
 ]
 
 

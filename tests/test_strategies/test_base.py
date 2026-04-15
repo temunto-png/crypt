@@ -240,6 +240,7 @@ class TestRegimeDetector:
                 "atr": np.ones(n),
                 "sma_short": np.ones(n),
                 "sma_long": np.ones(n),
+                "adx": np.ones(n),
             }
         )
         with pytest.raises(ValueError, match="データが不足"):

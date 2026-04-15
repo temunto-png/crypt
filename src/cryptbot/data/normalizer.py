@@ -128,4 +128,7 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     # Volume MA Ratio
     result["volume_ma_ratio"] = volume / volume.rolling(20).mean()
 
+    # ADX（RegimeDetector との共有計算を normalizer に統一）
+    result["adx"] = calculate_adx(result, period=14)
+
     return result

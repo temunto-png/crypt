@@ -50,6 +50,7 @@ class RiskManager:
         portfolio: PortfolioState,
         signal_confidence: float,
         current_price: float,
+        confidence_threshold: float = 0.0,
     ) -> RiskCheckResult:
         """エントリー前のリスクチェック。
 
@@ -61,8 +62,15 @@ class RiskManager:
         5. 最大ドローダウン >= max_drawdown_pct * peak_balance
         6. 連敗 >= max_consecutive_losses
         7. ポジション既に保有中（最大同時ポジション数 = 1）
+        8. signal_confidence < confidence_threshold（ML フィルター）
+
+        Args:
+            confidence_threshold: 0.0 のときはチェックをスキップ（デフォルト = 後方互換）
         """
         triggered: list[str] = []
+
+        if confidence_threshold > 0.0 and signal_confidence < confidence_threshold:
+            triggered.append("low_ml_confidence")
 
         if self._kill_switch.active:
             triggered.append("kill_switch_active")

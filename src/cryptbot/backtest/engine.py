@@ -26,7 +26,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 import numpy as np
@@ -35,6 +35,10 @@ from cryptbot.strategies.base import BaseStrategy, Direction, Signal
 from cryptbot.strategies.regime import RegimeDetector, Regime
 from cryptbot.risk.manager import RiskManager, PortfolioState
 from cryptbot.utils.time_utils import JST
+
+if TYPE_CHECKING:
+    from cryptbot.models.base import BaseMLModel
+    from cryptbot.models.degradation_detector import DegradationDetector
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +218,64 @@ def _has_regime_columns(data: pd.DataFrame) -> bool:
     return all(c in data.columns for c in RegimeDetector.REQUIRED_COLUMNS)
 
 
+def apply_ml_filter(
+    signal: "Signal",
+    window: "pd.DataFrame",
+    timestamp: datetime,
+    ml_model: "BaseMLModel | None",
+    degradation_detector: "DegradationDetector | None",
+    confidence_threshold: float = 0.6,
+) -> "Signal":
+    """ML モデルの confidence で Signal.confidence を上書きする（pure function）。
+
+    - ml_model が None の場合はシグナルをそのまま返す
+    - HOLD / SELL シグナルはそのまま返す（クローズシグナルはブロックしない）
+    - 特徴量が計算できない場合（データ不足・カラム不足）はそのまま返す
+    - DegradationDetector が degraded 状態の場合は confidence=0.0 を返す
+    """
+    if ml_model is None or signal.direction != Direction.BUY:
+        return signal
+
+    try:
+        from cryptbot.models.feature_builder import get_latest_features
+        features = get_latest_features(window)
+        if features.empty:
+            return signal
+
+        prediction = ml_model.predict(features)
+
+        # label <= 0 は DOWN または NEUTRAL 予測 → BUY を抑制
+        if prediction.label <= 0:
+            return Signal(
+                direction=Direction.HOLD,
+                confidence=0.0,
+                reason=f"{signal.reason}|ml_label:{prediction.label}",
+                timestamp=timestamp,
+            )
+
+        if degradation_detector is not None:
+            degradation_detector.update(prediction.confidence)
+            status = degradation_detector.check()
+            if status.degraded:
+                logger.warning("ML モデル劣化検知: シグナルを無効化 (%s)", status.message)
+                return Signal(
+                    direction=Direction.HOLD,
+                    confidence=0.0,
+                    reason=f"ml_degradation:{status.drop_pct:.1f}%_drop",
+                    timestamp=timestamp,
+                )
+
+        return Signal(
+            direction=signal.direction,
+            confidence=prediction.confidence,
+            reason=f"{signal.reason}|ml:{prediction.confidence:.3f}",
+            timestamp=timestamp,
+        )
+    except Exception as exc:
+        logger.warning("apply_ml_filter: 予期しないエラー (%s)、シグナルをそのまま返す", exc)
+        return signal
+
+
 class BacktestEngine:
     """バックテストエンジン。"""
 
@@ -232,6 +294,9 @@ class BacktestEngine:
         taker_fee_pct: float = TAKER_FEE_PCT,
         slippage_pct: float = SLIPPAGE_PCT,
         regime_detector: RegimeDetector | None = None,
+        ml_model: "BaseMLModel | None" = None,
+        degradation_detector: "DegradationDetector | None" = None,
+        ml_confidence_threshold: float = 0.6,
     ) -> None:
         self._strategy = strategy
         self._risk_manager = risk_manager
@@ -239,6 +304,9 @@ class BacktestEngine:
         self._taker_fee_pct = taker_fee_pct
         self._slippage_pct = slippage_pct
         self._regime_detector = regime_detector
+        self._ml_model = ml_model
+        self._degradation_detector = degradation_detector
+        self._ml_confidence_threshold = ml_confidence_threshold
 
     def run(
         self,
@@ -380,6 +448,13 @@ class BacktestEngine:
             # ---- レジームオーバーライド ----
             pending_signal = self._apply_regime_override(pending_signal, window, portfolio, timestamp)
 
+            # ---- ML フィルター ----
+            pending_signal = apply_ml_filter(
+                pending_signal, window, timestamp,
+                self._ml_model, self._degradation_detector,
+                self._ml_confidence_threshold,
+            )
+
             # ---- CVaR による補正 ----
             if pending_signal.direction == Direction.BUY:
                 cvar_action = self._risk_manager.get_cvar_action(recent_trade_returns)
@@ -499,6 +574,7 @@ class BacktestEngine:
                 portfolio,
                 pending_signal.confidence,
                 execution_price,
+                confidence_threshold=self._ml_confidence_threshold if self._ml_model is not None else 0.0,
             )
             if risk_result.allowed:
                 size_multiplier = 0.5 if cvar_action == "half" else 1.0

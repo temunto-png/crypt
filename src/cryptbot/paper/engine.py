@@ -16,17 +16,22 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from cryptbot.backtest.engine import (
     TradeRecord,
     _extract_timestamp,
+    apply_ml_filter,
     apply_regime_override,
     calc_mark_balance,
     calc_trade_record,
 )
+
+if TYPE_CHECKING:
+    from cryptbot.models.base import BaseMLModel
+    from cryptbot.models.degradation_detector import DegradationDetector
 from cryptbot.config.settings import PaperSettings
 from cryptbot.data.storage import Storage
 from cryptbot.paper.state import PaperState, PaperStateStore
@@ -68,6 +73,9 @@ class PaperEngine:
         storage: Storage,
         settings: PaperSettings,
         regime_detector: RegimeDetector | None = None,
+        ml_model: "BaseMLModel | None" = None,
+        degradation_detector: "DegradationDetector | None" = None,
+        ml_confidence_threshold: float = 0.6,
     ) -> None:
         self._strategy = strategy
         self._risk_manager = risk_manager
@@ -75,6 +83,9 @@ class PaperEngine:
         self._storage = storage
         self._settings = settings
         self._regime_detector = regime_detector
+        self._ml_model = ml_model
+        self._degradation_detector = degradation_detector
+        self._ml_confidence_threshold = ml_confidence_threshold
 
     def run_one_bar(self, data: pd.DataFrame) -> PaperRunResult:
         """最新バー 1 本分を処理して状態を保存する。
@@ -240,6 +251,13 @@ class PaperEngine:
             new_signal, data, portfolio, current_bar_ts, self._regime_detector
         )
 
+        # ---- ML フィルター ----
+        new_signal = apply_ml_filter(
+            new_signal, data, current_bar_ts,
+            self._ml_model, self._degradation_detector,
+            self._ml_confidence_threshold,
+        )
+
         # ---- CVaR フィルター ----
         cvar_action = "normal"
         if new_signal.direction == Direction.BUY:
@@ -320,7 +338,10 @@ class PaperEngine:
         # エントリー判定
         if portfolio.position_size == 0.0 and pending_signal.direction == Direction.BUY:
             risk_result = self._risk_manager.check_entry(
-                portfolio, pending_signal.confidence, execution_price
+                portfolio,
+                pending_signal.confidence,
+                execution_price,
+                confidence_threshold=self._ml_confidence_threshold if self._ml_model is not None else 0.0,
             )
             if risk_result.allowed:
                 size_multiplier = 0.5 if cvar_action == "half" else 1.0

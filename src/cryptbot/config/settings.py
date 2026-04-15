@@ -77,6 +77,19 @@ class PaperSettings(BaseModel):
     strategy_name: _StrategyName = "ma_cross"
 
 
+class ModelSettings(BaseModel):
+    """ML モデルフィルターの設定。"""
+
+    enabled: bool = False
+    experiments_dir: str = "src/cryptbot/models/experiments"
+    active_experiment_id: str | None = None     # None = 最新モデルを自動選択
+    model_type: Literal["lgbm", "xgb"] = "lgbm"
+    confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    # 劣化検知
+    degradation_window: int = Field(default=100, gt=0)
+    degradation_drop_pct: float = Field(default=20.0, gt=0.0)
+
+
 # ---------------------------------------------------------------------------
 # YAML 設定ソース
 # ---------------------------------------------------------------------------
@@ -130,6 +143,7 @@ class Settings(BaseSettings):
     backtest: BacktestSettings = BacktestSettings()
     logging: LoggingSettings = LoggingSettings()
     paper: PaperSettings = PaperSettings()
+    model: ModelSettings = ModelSettings()
 
     @classmethod
     def settings_customise_sources(  # type: ignore[override]
