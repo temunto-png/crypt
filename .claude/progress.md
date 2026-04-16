@@ -2,11 +2,11 @@
 
 ## 現在のフェーズ
 
-**P2（F4/F5/F6）— 実装完了・master マージ済み**
+**Codex レビュー引き継ぎ書更新・origin push 済み**
 
 - テスト数: **601 passed**
-- ブランチ: `master`（HEAD = `6711d87`）
-- 状態: ML fail-closed・OHLCV 整合性検証・ML 接続 全完了（commit d85de98、2026-04-16）
+- ブランチ: `master`（HEAD = `12ef25f`、origin と同期済み）
+- 状態: P1/P2/OHLCV 全完了。Codex レビュー引き継ぎ書を最新状態に更新（2026-04-16）
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
 
 ## リポジトリ
