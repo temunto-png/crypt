@@ -961,6 +961,8 @@ class TestPollActiveOrdersLiveStateSync:
         assert state is not None
         assert state.position_size == pytest.approx(0.05)
         assert state.entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_time is not None
 
     @pytest.mark.asyncio
     async def test_sell_filled_clears_position_in_live_state(

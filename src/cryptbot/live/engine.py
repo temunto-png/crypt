@@ -401,6 +401,8 @@ class LiveEngine:
                     if side == "BUY":
                         state.position_size = result.executed_amount
                         state.entry_price = result.average_price
+                        state.position_entry_price = result.average_price
+                        state.position_entry_time = now_jst().isoformat()
                     elif side == "SELL":
                         state.position_size = 0.0
                         state.entry_price = 0.0
