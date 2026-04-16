@@ -588,18 +588,17 @@ class TestSyncInitialBalance:
         assert loaded.balance == 500_000.0
 
     @pytest.mark.asyncio
-    async def test_first_run_with_btc_logs_warning(
+    async def test_first_run_with_btc_raises_gate_error(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """初回起動時に BTC 残高がある場合 WARNING が出る。"""
-        import logging
+        """初回起動時に BTC 残高がある場合 LiveGateError が raise される。"""
+        from cryptbot.live.gate import LiveGateError
         engine = _make_engine(
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
         assets = {"jpy": 500_000.0, "btc": 0.001}
-        with patch("cryptbot.live.engine.logger") as mock_logger:
+        with pytest.raises(LiveGateError, match="BTC 残高"):
             await engine._sync_initial_balance(assets)
-        mock_logger.warning.assert_called()
 
     @pytest.mark.asyncio
     async def test_restart_syncs_balance_within_tolerance(
@@ -667,6 +666,73 @@ class TestSyncInitialBalance:
         assert loaded is not None
         assert loaded.balance == 1_000_500.0
         assert loaded.peak_balance == 1_000_500.0
+
+    @pytest.mark.asyncio
+    async def test_restart_no_position_with_btc_raises_gate_error(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に LiveState がノーポジションでも実 BTC 残高があれば LiveGateError。"""
+        from cryptbot.live.gate import LiveGateError
+        _seed_state(state_store, balance=1_000_000.0)  # position_size=0
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        assets = {"jpy": 1_000_000.0, "btc": 0.001}
+        with pytest.raises(LiveGateError, match="BTC"):
+            await engine._sync_initial_balance(assets)
+
+    @pytest.mark.asyncio
+    async def test_restart_with_position_but_no_btc_raises_gate_error(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に LiveState にポジションがあるが実 BTC ゼロなら LiveGateError。"""
+        from cryptbot.live.gate import LiveGateError
+        _seed_state(state_store, balance=1_000_000.0)
+        state = state_store.load()
+        state.position_size = 0.05
+        state_store.save(state)
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        assets = {"jpy": 1_000_000.0, "btc": 0.0}
+        with pytest.raises(LiveGateError, match="BTC"):
+            await engine._sync_initial_balance(assets)
+
+    @pytest.mark.asyncio
+    async def test_restart_btc_position_within_tolerance_passes(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に BTC 残高と position_size の乖離が許容差内なら通過する。"""
+        _seed_state(state_store, balance=1_000_000.0)
+        state = state_store.load()
+        state.position_size = 0.05
+        state_store.save(state)
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        # 乖離 0.0% → 許容
+        assets = {"jpy": 1_000_000.0, "btc": 0.05}
+        await engine._sync_initial_balance(assets)  # raises しないこと
+        loaded = state_store.load()
+        assert loaded.balance == 1_000_000.0
+
+    @pytest.mark.asyncio
+    async def test_restart_btc_position_exceeds_tolerance_raises(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """再起動時に BTC 残高と position_size の乖離が許容差超過なら LiveGateError。"""
+        from cryptbot.live.gate import LiveGateError
+        _seed_state(state_store, balance=1_000_000.0)
+        state = state_store.load()
+        state.position_size = 0.05
+        state_store.save(state)
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        # 乖離 40% → 許容差(0.1%)超過
+        assets = {"jpy": 1_000_000.0, "btc": 0.07}
+        with pytest.raises(LiveGateError, match="BTC"):
+            await engine._sync_initial_balance(assets)
 
 
 # ------------------------------------------------------------------ #

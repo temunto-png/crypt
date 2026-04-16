@@ -605,10 +605,10 @@ class LiveEngine:
 
         if existing is None:
             if btc >= self._settings.min_order_size_btc:
-                logger.warning(
-                    "live engine: 起動時に BTC 残高 %.6f を検出。"
-                    "エントリー価格不明のため position_size=0 で起動します。手動確認を推奨。",
-                    btc,
+                raise LiveGateError(
+                    f"初回起動時に BTC 残高 {btc:.6f} BTC を検出しました。"
+                    f"既存ポジションが LiveState に記録されていません。"
+                    f"エントリー価格を確認し、手動で LiveState を修正後に再起動してください。"
                 )
             portfolio = self._make_initial_portfolio(jpy)
             state = LiveStateStore.from_portfolio_state(
@@ -631,6 +631,31 @@ class LiveEngine:
                         f"実残高 ({jpy:.0f} JPY) と内部残高 ({existing.balance:.0f} JPY) の乖離が "
                         f"許容差 ({self._settings.balance_sync_tolerance_pct:.1%}) を超えています "
                         f"(乖離率: {diff_pct:.1%})。手動確認後に再起動してください。"
+                    )
+            # BTC 残高の照合
+            if existing.position_size < self._settings.min_order_size_btc:
+                # LiveState はノーポジション
+                if btc >= self._settings.min_order_size_btc:
+                    raise LiveGateError(
+                        f"再起動: BTC 残高 {btc:.6f} が存在しますが LiveState はノーポジションです。"
+                        f"手動確認後に再起動してください。"
+                    )
+            else:
+                # LiveState はポジションあり
+                if btc < self._settings.min_order_size_btc:
+                    raise LiveGateError(
+                        f"再起動: LiveState には {existing.position_size:.6f} BTC のポジションがありますが、"
+                        f"実口座の BTC 残高 ({btc:.6f}) が最小注文数量を下回っています。"
+                        f"手動確認後に再起動してください。"
+                    )
+                # 数量の乖離チェック
+                btc_diff_pct = abs(btc - existing.position_size) / existing.position_size
+                if btc_diff_pct > self._settings.balance_sync_tolerance_pct:
+                    raise LiveGateError(
+                        f"再起動: 実 BTC 残高 ({btc:.6f}) と LiveState の position_size "
+                        f"({existing.position_size:.6f}) の乖離 ({btc_diff_pct:.1%}) が "
+                        f"許容差 ({self._settings.balance_sync_tolerance_pct:.1%}) を超えています。"
+                        f"手動確認後に再起動してください。"
                     )
             old_balance = existing.balance
             existing.balance = jpy
