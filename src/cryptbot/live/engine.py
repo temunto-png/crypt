@@ -376,17 +376,48 @@ class LiveEngine:
         ]
         for order in orders_to_poll:
             try:
-                await self._executor.handle_partial_fill(
+                result = await self._executor.handle_partial_fill(
                     pair=self._settings.pair,
                     db_order_id=int(order["id"]),
                     exchange_order_id=str(order.get("exchange_order_id", "")),
                     created_at_iso=str(order["created_at"]),
                     partial_fill_timeout_sec=self._settings.order_timeout_sec,
+                    side=str(order.get("side", "")),
                 )
             except Exception:
                 logger.exception(
                     "live engine: 注文 (id=%s) のハンドルに失敗", order["id"]
                 )
+                continue
+
+            if result.terminal and result.status == "FULLY_FILLED":
+                try:
+                    state = self._state_store.load()
+                    if state is None:
+                        raise LiveGateError(
+                            f"約定同期: LiveState が存在しません (order_id={result.db_order_id})"
+                        )
+                    side = result.side.upper()
+                    if side == "BUY":
+                        state.position_size = result.executed_amount
+                        state.entry_price = result.average_price
+                    elif side == "SELL":
+                        state.position_size = 0.0
+                        state.entry_price = 0.0
+                        state.position_entry_time = None
+                        state.position_entry_price = 0.0
+                    state.updated_at = now_jst().isoformat()
+                    self._state_store.save(state)
+                    logger.info(
+                        "live engine: 約定同期完了 order_id=%s side=%s amount=%.4f price=%.0f",
+                        result.db_order_id, side, result.executed_amount, result.average_price,
+                    )
+                except LiveGateError:
+                    raise
+                except Exception:
+                    raise LiveGateError(
+                        f"約定同期: LiveState の更新に失敗しました (order_id={result.db_order_id})"
+                    )
 
     # ------------------------------------------------------------------
     # 内部ヘルパー

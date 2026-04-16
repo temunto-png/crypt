@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 
 from cryptbot.data.storage import Storage
@@ -17,6 +18,18 @@ from cryptbot.utils.time_utils import JST
 
 class DuplicateOrderError(RuntimeError):
     """同一 pair にアクティブ注文が既に存在する場合に送出される例外。"""
+
+
+@dataclass
+class OrderSyncResult:
+    """handle_partial_fill() が返す約定同期結果。"""
+
+    db_order_id: int
+    side: str                    # "BUY" or "SELL"
+    status: str                  # "FULLY_FILLED" | "TIMEOUT_CANCELLED" | "WAITING"
+    executed_amount: float       # 約定済み数量 [BTC]
+    average_price: float         # 平均約定価格 [JPY]
+    terminal: bool               # True = これ以上ポーリング不要な終端状態
 
 
 class LiveExecutor(BaseExecutor):
@@ -175,13 +188,14 @@ class LiveExecutor(BaseExecutor):
         exchange_order_id: str,
         created_at_iso: str,
         partial_fill_timeout_sec: int,
-    ) -> None:
+        side: str = "",
+    ) -> OrderSyncResult:
         """PARTIAL_FILLED 注文の状態を1回取得して更新する（ワンショット）。
 
         LiveEngine のポーリングタスクから定期的に呼ばれる。
-        - 全量約定済み（FULLY_FILLED）→ DB を FILLED に遷移
-        - タイムアウト超過かつ未約定 → cancel_order() を呼び出し
-        - 上記以外 → 何もしない（次回ポーリング待ち）
+        - 全量約定済み（FULLY_FILLED）→ DB を FILLED に遷移、terminal=True を返す
+        - タイムアウト超過かつ未約定 → cancel_order() を呼び出し、terminal=True を返す
+        - 上記以外 → 何もしない（次回ポーリング待ち）、terminal=False を返す
 
         Args:
             pair: 取引ペア
@@ -189,6 +203,7 @@ class LiveExecutor(BaseExecutor):
             exchange_order_id: 取引所側の注文 ID
             created_at_iso: 注文作成時刻（ISO 文字列）
             partial_fill_timeout_sec: タイムアウト秒数（LiveSettings から取得）
+            side: 注文サイド（"BUY" or "SELL"）
         """
         order_data = await self._exchange.get_order(pair, exchange_order_id)
         exchange_status = order_data.get("status", "")
@@ -213,10 +228,34 @@ class LiveExecutor(BaseExecutor):
                 fill_price=avg_price,
                 fill_size=fill_amount,
             )
-            return
+            return OrderSyncResult(
+                db_order_id=db_order_id,
+                side=side,
+                status="FULLY_FILLED",
+                executed_amount=fill_amount,
+                average_price=avg_price,
+                terminal=True,
+            )
 
         # タイムアウトチェック: 超過していれば残量キャンセル
         created_at = datetime.fromisoformat(created_at_iso)
         elapsed = (datetime.now(tz=JST) - created_at).total_seconds()
         if elapsed > partial_fill_timeout_sec:
             await self.cancel_order(pair, str(db_order_id))
+            return OrderSyncResult(
+                db_order_id=db_order_id,
+                side=side,
+                status="TIMEOUT_CANCELLED",
+                executed_amount=0.0,
+                average_price=0.0,
+                terminal=True,
+            )
+
+        return OrderSyncResult(
+            db_order_id=db_order_id,
+            side=side,
+            status="WAITING",
+            executed_amount=0.0,
+            average_price=0.0,
+            terminal=False,
+        )

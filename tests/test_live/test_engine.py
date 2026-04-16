@@ -433,6 +433,7 @@ class TestPollPartialFills:
             exchange_order_id="EX_789",
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
+            side="",
         )
 
     @pytest.mark.asyncio
@@ -458,6 +459,7 @@ class TestPollPartialFills:
             exchange_order_id="EX_100",
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
+            side="",
         )
 
     @pytest.mark.asyncio
@@ -917,3 +919,116 @@ class TestBarLoop:
                     pass
 
         assert call_count >= 1  # クラッシュせず到達できた
+
+
+# ------------------------------------------------------------------ #
+# NF1: _poll_active_orders() が約定後に LiveState を更新するテスト
+# ------------------------------------------------------------------ #
+
+class TestPollActiveOrdersLiveStateSync:
+    """_poll_active_orders() が約定後に LiveState を更新するテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_buy_filled_updates_position_in_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """BUY FULLY_FILLED 後に LiveState.position_size と entry_price が更新される。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+
+        buy_order = {
+            "id": 10,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_100",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=10,
+            side="BUY",
+            status="FULLY_FILLED",
+            executed_amount=0.05,
+            average_price=5_000_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.05)
+        assert state.entry_price == pytest.approx(5_000_000.0)
+
+    @pytest.mark.asyncio
+    async def test_sell_filled_clears_position_in_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """SELL FULLY_FILLED 後に LiveState.position_size が 0 になる。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+        # まずポジションあり状態にする
+        state = state_store.load()
+        state.position_size = 0.05
+        state.entry_price = 5_000_000.0
+        state_store.save(state)
+
+        sell_order = {
+            "id": 11,
+            "status": "SUBMITTED",
+            "side": "SELL",
+            "exchange_order_id": "EX_101",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=11,
+            side="SELL",
+            status="FULLY_FILLED",
+            executed_amount=0.05,
+            average_price=5_100_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[sell_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.0)
+        assert state.entry_price == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_live_state_save_failure_raises_gate_error(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """LiveState 保存失敗時に LiveGateError が raise される。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        from cryptbot.live.gate import LiveGateError
+        _seed_state(state_store, balance=1_000_000.0)
+
+        buy_order = {
+            "id": 10,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_100",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=10,
+            side="BUY",
+            status="FULLY_FILLED",
+            executed_amount=0.05,
+            average_price=5_000_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            with patch.object(state_store, "save", side_effect=RuntimeError("DB error")):
+                with pytest.raises(LiveGateError):
+                    await engine._poll_active_orders()

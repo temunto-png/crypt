@@ -1,6 +1,7 @@
 """LiveExecutor のテスト。"""
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,7 +10,7 @@ import pytest
 from cryptbot.data.storage import Storage
 from cryptbot.exchanges.base import ExchangeError
 from cryptbot.execution.live_executor import DuplicateOrderError, LiveExecutor
-from cryptbot.utils.time_utils import now_jst
+from cryptbot.utils.time_utils import JST, now_jst
 
 
 # ------------------------------------------------------------------ #
@@ -431,3 +432,88 @@ class TestLiveExecutorInterface:
 
     def test_duplicate_order_error_is_runtime_error(self) -> None:
         assert issubclass(DuplicateOrderError, RuntimeError)
+
+
+# ------------------------------------------------------------------ #
+# NF1: handle_partial_fill() が OrderSyncResult を返すテスト
+# ------------------------------------------------------------------ #
+
+class TestHandlePartialFillResult:
+    """handle_partial_fill() が OrderSyncResult を返すことのテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_fully_filled_returns_terminal_result(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """FULLY_FILLED → terminal=True, status="FULLY_FILLED", 正確な数量・価格。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.05)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "FULLY_FILLED",
+            "executed_amount": "0.05",
+            "average_price": "5000000",
+        })
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=now_jst().isoformat(),
+            partial_fill_timeout_sec=7200,
+            side="BUY",
+        )
+
+        assert result.terminal is True
+        assert result.status == "FULLY_FILLED"
+        assert result.executed_amount == pytest.approx(0.05)
+        assert result.average_price == pytest.approx(5_000_000.0)
+        assert result.side == "BUY"
+
+    @pytest.mark.asyncio
+    async def test_waiting_returns_non_terminal_result(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """UNFILLED（待機中）→ terminal=False, status="WAITING"。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.05)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "UNFILLED",
+            "executed_amount": "0",
+            "average_price": "0",
+        })
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=now_jst().isoformat(),
+            partial_fill_timeout_sec=7200,
+            side="BUY",
+        )
+
+        assert result.terminal is False
+        assert result.status == "WAITING"
+
+    @pytest.mark.asyncio
+    async def test_timeout_returns_terminal_cancelled(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """タイムアウト → terminal=True, status="TIMEOUT_CANCELLED"。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.05)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "UNFILLED",
+            "executed_amount": "0",
+            "average_price": "0",
+        })
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+        old_time = (now_jst() - timedelta(hours=3)).isoformat()
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=old_time,
+            partial_fill_timeout_sec=3600,
+            side="BUY",
+        )
+
+        assert result.terminal is True
+        assert result.status == "TIMEOUT_CANCELLED"
