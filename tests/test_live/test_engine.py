@@ -846,3 +846,74 @@ class TestRecordSignalFailClosed:
 
         with patch.object(storage, "insert_audit_log", side_effect=RuntimeError("DB error")):
             engine._record_signal(hold_signal, portfolio)
+
+
+class TestBarLoop:
+    @pytest.mark.asyncio
+    async def test_bar_loop_calls_update_latest(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """_bar_loop() が各バー処理前に update_latest() を呼ぶ。"""
+        mock_updater = MagicMock()
+        mock_updater.update_latest = AsyncMock(return_value=True)
+
+        engine = LiveEngine(
+            strategy=AlwaysHoldStrategy(),
+            risk_manager=risk_manager,
+            state_store=state_store,
+            storage=storage,
+            executor=mock_executor,
+            settings=settings,
+            ohlcv_updater=mock_updater,
+        )
+        _seed_state(state_store)
+
+        call_count = 0
+
+        async def fake_wait():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with patch.object(engine, "_wait_for_next_bar", side_effect=fake_wait):
+            with patch.object(engine, "_load_ohlcv", return_value=None):
+                try:
+                    await engine._bar_loop()
+                except asyncio.CancelledError:
+                    pass
+
+        assert mock_updater.update_latest.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_bar_loop_skips_update_when_no_updater(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """ohlcv_updater=None の場合でも _bar_loop() がクラッシュしない。"""
+        engine = LiveEngine(
+            strategy=AlwaysHoldStrategy(),
+            risk_manager=risk_manager,
+            state_store=state_store,
+            storage=storage,
+            executor=mock_executor,
+            settings=settings,
+            ohlcv_updater=None,
+        )
+        _seed_state(state_store)
+
+        call_count = 0
+
+        async def fake_wait():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with patch.object(engine, "_wait_for_next_bar", side_effect=fake_wait):
+            with patch.object(engine, "_load_ohlcv", return_value=None):
+                try:
+                    await engine._bar_loop()
+                except asyncio.CancelledError:
+                    pass
+
+        assert call_count >= 1  # クラッシュせず到達できた

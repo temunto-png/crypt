@@ -29,6 +29,7 @@ from cryptbot.backtest.engine import (
 )
 
 if TYPE_CHECKING:
+    from cryptbot.data.ohlcv_updater import OhlcvUpdater
     from cryptbot.models.base import BaseMLModel
     from cryptbot.models.degradation_detector import DegradationDetector
 from cryptbot.config.settings import LiveSettings
@@ -94,6 +95,7 @@ class LiveEngine:
         ml_model: "BaseMLModel | None" = None,
         degradation_detector: "DegradationDetector | None" = None,
         ml_confidence_threshold: float = 0.6,
+        ohlcv_updater: "OhlcvUpdater | None" = None,
     ) -> None:
         self._strategy = strategy
         self._risk_manager = risk_manager
@@ -105,6 +107,7 @@ class LiveEngine:
         self._ml_model = ml_model
         self._degradation_detector = degradation_detector
         self._ml_confidence_threshold = ml_confidence_threshold
+        self._ohlcv_updater = ohlcv_updater
 
     # ------------------------------------------------------------------
     # パブリック API
@@ -346,6 +349,8 @@ class LiveEngine:
         """バー確定を待って run_one_bar() を呼ぶ無限ループ。"""
         while True:
             await self._wait_for_next_bar()
+            if self._ohlcv_updater is not None:
+                await self._ohlcv_updater.update_latest()
             data = self._load_ohlcv()
             if data is not None:
                 await self.run_one_bar(data)
