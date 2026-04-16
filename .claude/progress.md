@@ -2,11 +2,11 @@
 
 ## 現在のフェーズ
 
-**OHLCV 自動投入 — 実装完了・master マージ済み**
+**P2（F4/F5/F6）— 実装完了・master マージ済み**
 
-- テスト数: **601 passed**（OHLCV 自動投入完了時点）
-- ブランチ: `master`（HEAD = `303f425`）
-- 状態: OhlcvUpdater 実装・LiveEngine 注入・main.py バックフィル追加完了（2026-04-16）
+- テスト数: **601 passed**
+- ブランチ: `master`（HEAD = `6711d87`）
+- 状態: ML fail-closed・OHLCV 整合性検証・ML 接続 全完了（commit d85de98、2026-04-16）
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
 
 ## リポジトリ
@@ -52,8 +52,9 @@
 1. ~~**P2 実装を開始**~~（完了）
 2. ~~Codex ソースレビュー対応~~（完了 — F1〜F7 全対応済み）
 3. ~~**OHLCV 自動投入**~~（完了 — OhlcvUpdater 実装・LiveEngine 注入・バックフィル追加）
-4. ポジション同期（リカバリー）実装（中優先度）
-5. 本番起動準備
+4. ~~**P2（F4/F5/F6）実装**~~（完了 — commit d85de98・テスト 601 passed）
+5. ポジション同期（リカバリー）実装（中優先度）
+6. 本番起動準備
 
 ## P2（F4/F5/F6）設計メモ（2026-04-16）
 
@@ -85,17 +86,17 @@
 
 ### 実装フェーズ（チェックリスト）
 
-- [ ] **F5-1**: `backtest/engine.py` — `apply_ml_filter()` に `fail_closed` 引数追加
-- [ ] **F5-2**: `live/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
-- [ ] **F5-3**: `paper/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
-- [ ] **F5-4**: `tests/test_backtest/test_engine.py` — `TestApplyMlFilter` 4件追加
-- [ ] **F6-1**: `data/storage.py` — `load_ohlcv()` に `verify` 引数追加
-- [ ] **F6-2**: `live/engine.py` — `_load_ohlcv()` に `verify=True`
-- [ ] **F6-3**: `tests/test_data/test_storage.py` — `TestLoadOhlcvVerify` 5件追加
-- [ ] **F4-1**: `main.py` — `_build_ml_components()` 追加・`_run_paper()` 接続
-- [ ] **F4-2**: `main.py` — `_run_live()` 接続
-- [ ] **F4-3**: `tests/test_main/test_main.py` — `TestBuildMlComponents` 4件追加
-- [ ] **確認**: `pytest -q` 全通過
+- [x] **F5-1**: `backtest/engine.py` — `apply_ml_filter()` に `fail_closed` 引数追加
+- [x] **F5-2**: `live/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
+- [x] **F5-3**: `paper/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
+- [x] **F5-4**: `tests/test_backtest/test_engine.py` — `TestApplyMlFilter` 4件追加
+- [x] **F6-1**: `data/storage.py` — `load_ohlcv()` に `verify` 引数追加
+- [x] **F6-2**: `live/engine.py` — `_load_ohlcv()` に `verify=True`
+- [x] **F6-3**: `tests/test_data/test_storage.py` — `TestLoadOhlcvVerify` 5件追加
+- [x] **F4-1**: `main.py` — `_build_ml_components()` 追加・`_run_paper()` 接続
+- [x] **F4-2**: `main.py` — `_run_live()` 接続
+- [x] **F4-3**: `tests/test_main/test_main.py` — `TestBuildMlComponents` 4件追加
+- [x] **確認**: `pytest -q` 全通過（601 passed）
 
 ## P1 バグ修正 完了（master マージ済み、2026-04-16）
 
