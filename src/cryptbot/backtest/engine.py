@@ -225,21 +225,37 @@ def apply_ml_filter(
     ml_model: "BaseMLModel | None",
     degradation_detector: "DegradationDetector | None",
     confidence_threshold: float = 0.6,
+    fail_closed: bool = False,
 ) -> "Signal":
     """ML モデルの confidence で Signal.confidence を上書きする（pure function）。
 
     - ml_model が None の場合はシグナルをそのまま返す
     - HOLD / SELL シグナルはそのまま返す（クローズシグナルはブロックしない）
-    - 特徴量が計算できない場合（データ不足・カラム不足）はそのまま返す
+    - 特徴量が計算できない場合（データ不足・カラム不足）:
+        fail_closed=False（デフォルト）: シグナルをそのまま返す
+        fail_closed=True: BUY を HOLD に変換して返す
     - DegradationDetector が degraded 状態の場合は confidence=0.0 を返す
+    - 例外発生時:
+        fail_closed=False: シグナルをそのまま返す
+        fail_closed=True: BUY を HOLD に変換して返す
     """
     if ml_model is None or signal.direction != Direction.BUY:
         return signal
+
+    def _hold_on_failure(reason: str) -> "Signal":
+        return Signal(
+            direction=Direction.HOLD,
+            confidence=0.0,
+            reason=reason,
+            timestamp=timestamp,
+        )
 
     try:
         from cryptbot.models.feature_builder import get_latest_features
         features = get_latest_features(window)
         if features.empty:
+            if fail_closed:
+                return _hold_on_failure("ml_filter:no_features")
             return signal
 
         prediction = ml_model.predict(features)
@@ -272,7 +288,9 @@ def apply_ml_filter(
             timestamp=timestamp,
         )
     except Exception as exc:
-        logger.warning("apply_ml_filter: 予期しないエラー (%s)、シグナルをそのまま返す", exc)
+        logger.warning("apply_ml_filter: 予期しないエラー (%s)、%s", exc, "HOLD を返す" if fail_closed else "シグナルをそのまま返す")
+        if fail_closed:
+            return _hold_on_failure(f"ml_filter:error:{type(exc).__name__}")
         return signal
 
 

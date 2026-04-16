@@ -146,3 +146,105 @@ class TestVerifyAuditLog:
 
         result = verify_main(["--db", str(tmp_path / "tampered.db")])
         assert result == 1
+
+
+# ------------------------------------------------------------------ #
+# TestBuildMlComponents
+# ------------------------------------------------------------------ #
+
+class TestBuildMlComponents:
+    """_build_ml_components() の動作を検証する。"""
+
+    def _make_settings_ml_disabled(self, tmp_path: Path):
+        """model.enabled=False の Settings を返す。"""
+        from cryptbot.config.settings import Settings
+        return Settings(
+            _env_file=None,
+            model={"enabled": False},
+        )
+
+    def _make_settings_ml_enabled(self, tmp_path: Path):
+        """model.enabled=True, experiments_dir を tmp_path に向けた Settings を返す。"""
+        from cryptbot.config.settings import Settings
+        return Settings(
+            _env_file=None,
+            model={
+                "enabled": True,
+                "experiments_dir": str(tmp_path / "experiments"),
+                "model_type": "lgbm",
+            },
+        )
+
+    def test_disabled_returns_none_none(self, tmp_path: Path) -> None:
+        """enabled=False のとき (None, None) を返す。"""
+        from cryptbot.main import _build_ml_components
+        settings = self._make_settings_ml_disabled(tmp_path)
+        result = _build_ml_components(settings)
+        assert result == (None, None)
+
+    def test_enabled_no_model_returns_none(self, tmp_path: Path) -> None:
+        """enabled=True でモデルが存在しないとき None（fail-closed）を返す。"""
+        from cryptbot.main import _build_ml_components
+        settings = self._make_settings_ml_enabled(tmp_path)
+        result = _build_ml_components(settings)
+        assert result is None
+
+    def test_enabled_with_model_returns_components(self, tmp_path: Path) -> None:
+        """enabled=True で正常モデルが存在するとき (model, detector) タプルを返す。"""
+        import numpy as np
+        import pandas as pd
+        from cryptbot.main import _build_ml_components
+        from cryptbot.models.experiment_manager import ExperimentManager, ExperimentRecord
+        from cryptbot.models.lgbm_model import LightGBMModel
+        from cryptbot.models.degradation_detector import DegradationDetector
+
+        exp_dir = tmp_path / "experiments"
+        exp_dir.mkdir()
+        manager = ExperimentManager(base_dir=str(exp_dir))
+
+        # LightGBMModel.fit() で正規のモデルを訓練
+        feature_cols = [f"f{i}" for i in range(10)]
+        X = pd.DataFrame(np.random.rand(60, 10), columns=feature_cols)
+        y = pd.Series(np.random.randint(0, 2, 60))
+        model = LightGBMModel(params={"num_leaves": 4, "verbose": -1, "n_estimators": 2})
+        model.fit(X, y)
+
+        record = ExperimentRecord(
+            experiment_id="test_lgbm_20240101_000000",
+            model_name="lgbm",
+            label_type="binary",
+            horizon=1,
+            train_start="2024-01-01",
+            train_end="2024-06-01",
+            val_start="2024-06-01",
+            val_end="2024-12-01",
+            params={},
+            metrics={"accuracy": 0.65},
+            model_path="test_lgbm_20240101_000000.pkl",
+            created_at="2024-01-01T00:00:00",
+        )
+        manager.save_experiment(model, record)
+
+        settings = self._make_settings_ml_enabled(tmp_path)
+        result = _build_ml_components(settings)
+        assert result is not None
+        ml_model, degradation_detector = result
+        assert ml_model is not None
+        assert isinstance(degradation_detector, DegradationDetector)
+
+    def test_enabled_active_experiment_not_found_returns_none(self, tmp_path: Path) -> None:
+        """enabled=True で active_experiment_id が存在しないとき None を返す。"""
+        from cryptbot.config.settings import Settings
+        from cryptbot.main import _build_ml_components
+
+        settings = Settings(
+            _env_file=None,
+            model={
+                "enabled": True,
+                "experiments_dir": str(tmp_path / "experiments"),
+                "model_type": "lgbm",
+                "active_experiment_id": "nonexistent_id",
+            },
+        )
+        result = _build_ml_components(settings)
+        assert result is None

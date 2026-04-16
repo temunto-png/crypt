@@ -919,3 +919,88 @@ def test_cvar_stop_hold_signal_blocks_entry(tmp_path: Path) -> None:
         position_entry_price=0.0,
     )
     assert p_after.position_size == 0.0, "stop(HOLD)なのにエントリーされた"
+
+
+# ------------------------------------------------------------------ #
+# TestApplyMlFilter
+# ------------------------------------------------------------------ #
+
+class _StubMLModel:
+    """apply_ml_filter テスト用スタブ。predict() が呼ばれると例外を送出する。"""
+
+    def predict(self, features):
+        raise RuntimeError("stub error")
+
+
+class _OkMLModel:
+    """predict() が常に正常値を返すスタブ。"""
+
+    def predict(self, features):
+        from cryptbot.models.base import ModelPrediction
+        return ModelPrediction(label=1, confidence=0.8)
+
+
+class TestApplyMlFilter:
+    """apply_ml_filter の fail_closed 引数の動作を検証する。"""
+
+    def _buy_signal(self) -> Signal:
+        return Signal(direction=Direction.BUY, confidence=0.9, reason="test", timestamp=datetime(2024, 1, 1, tzinfo=JST))
+
+    def _empty_window(self) -> pd.DataFrame:
+        """特徴量が計算できない空の DataFrame（カラム不足）。"""
+        return pd.DataFrame({"close": [1.0]})
+
+    def test_empty_features_fail_open_returns_signal(self) -> None:
+        """fail_closed=False: 特徴量が空のとき、元のシグナルをそのまま返す。"""
+        from cryptbot.backtest.engine import apply_ml_filter
+
+        signal = self._buy_signal()
+        result = apply_ml_filter(
+            signal, self._empty_window(), signal.timestamp,
+            _OkMLModel(), None,
+            fail_closed=False,
+        )
+        assert result.direction == Direction.BUY
+
+    def test_empty_features_fail_closed_returns_hold(self) -> None:
+        """fail_closed=True: 特徴量が空のとき、BUY を HOLD に変換する。"""
+        from cryptbot.backtest.engine import apply_ml_filter
+
+        signal = self._buy_signal()
+        result = apply_ml_filter(
+            signal, self._empty_window(), signal.timestamp,
+            _OkMLModel(), None,
+            fail_closed=True,
+        )
+        assert result.direction == Direction.HOLD
+        assert result.confidence == 0.0
+        assert "ml_filter" in result.reason
+
+    def test_exception_fail_open_returns_signal(self) -> None:
+        """fail_closed=False: predict() が例外を送出したとき、元のシグナルをそのまま返す。"""
+        from cryptbot.backtest.engine import apply_ml_filter
+
+        # 十分なカラムを持つ DataFrame を用意して get_latest_features まで到達させる
+        # _StubMLModel.predict() が例外を送出するシナリオ
+        window = _make_ohlcv(100)
+        signal = self._buy_signal()
+        result = apply_ml_filter(
+            signal, window, signal.timestamp,
+            _StubMLModel(), None,
+            fail_closed=False,
+        )
+        assert result.direction == Direction.BUY
+
+    def test_exception_fail_closed_returns_hold(self) -> None:
+        """fail_closed=True: predict() が例外を送出したとき、BUY を HOLD に変換する。"""
+        from cryptbot.backtest.engine import apply_ml_filter
+
+        window = _make_ohlcv(100)
+        signal = self._buy_signal()
+        result = apply_ml_filter(
+            signal, window, signal.timestamp,
+            _StubMLModel(), None,
+            fail_closed=True,
+        )
+        assert result.direction == Direction.HOLD
+        assert result.confidence == 0.0

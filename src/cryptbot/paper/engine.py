@@ -256,6 +256,7 @@ class PaperEngine:
             new_signal, data, current_bar_ts,
             self._ml_model, self._degradation_detector,
             self._ml_confidence_threshold,
+            fail_closed=True,
         )
 
         # ---- CVaR フィルター ----

@@ -757,3 +757,120 @@ class TestExclusiveTransaction:
         rows = verify_conn.execute("SELECT * FROM orders WHERE pair = 'btc_jpy'").fetchall()
         verify_conn.close()
         assert len(rows) == 0
+
+
+# ------------------------------------------------------------------ #
+# TestLoadOhlcvVerify
+# ------------------------------------------------------------------ #
+
+def _make_valid_df(year: int = 2024, n: int = 3) -> pd.DataFrame:
+    """テスト用の正常な OHLCV DataFrame を生成する。"""
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+
+    JST = ZoneInfo("Asia/Tokyo")
+    base = datetime(year, 1, 1, tzinfo=JST)
+    timestamps = [base.replace(hour=h) for h in range(n)]
+    return pd.DataFrame({
+        "timestamp": pd.DatetimeIndex(timestamps, tz="Asia/Tokyo"),
+        "open":  [100.0] * n,
+        "high":  [110.0] * n,
+        "low":   [90.0] * n,
+        "close": [105.0] * n,
+        "volume": [1.0] * n,
+    })
+
+
+def _write_invalid_parquet(path: Path) -> None:
+    """high < low の不正な Parquet を直接書き込む（save_ohlcv をバイパス）。"""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from zoneinfo import ZoneInfo
+
+    JST = ZoneInfo("Asia/Tokyo")
+    ts = pd.Timestamp("2025-01-01 00:00:00", tz="Asia/Tokyo")
+    schema = pa.schema([
+        pa.field("timestamp", pa.timestamp("ns", tz="Asia/Tokyo")),
+        pa.field("open", pa.float64()),
+        pa.field("high", pa.float64()),
+        pa.field("low", pa.float64()),
+        pa.field("close", pa.float64()),
+        pa.field("volume", pa.float64()),
+    ])
+    table = pa.table(
+        {
+            "timestamp": pa.array([ts.value], type=pa.timestamp("ns", tz="Asia/Tokyo")),
+            "open":  pa.array([100.0]),
+            "high":  pa.array([80.0]),   # high < low → 不正
+            "low":   pa.array([90.0]),
+            "close": pa.array([85.0]),
+            "volume": pa.array([1.0]),
+        },
+        schema=schema,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)
+
+
+class TestLoadOhlcvVerify:
+    """load_ohlcv() の verify 引数の動作を検証する。"""
+
+    def test_verify_false_loads_invalid_file(self, tmp_path: Path) -> None:
+        """verify=False（デフォルト）の場合、整合性エラーがあってもファイルをロードする。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        invalid_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2025.parquet"
+        _write_invalid_parquet(invalid_path)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=False)
+        assert len(df) == 1, "verify=False なのにファイルがスキップされた"
+
+    def test_verify_true_skips_invalid_file(self, tmp_path: Path) -> None:
+        """verify=True の場合、整合性エラーのあるファイルをスキップして空を返す。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        invalid_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2025.parquet"
+        _write_invalid_parquet(invalid_path)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
+        assert df.empty, "不正ファイルがスキップされていない"
+
+    def test_verify_true_loads_valid_file(self, tmp_path: Path) -> None:
+        """verify=True の場合、正常なファイルは通常どおりロードされる。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
+        assert len(df) == 3, "正常ファイルが誤ってスキップされた"
+
+    def test_verify_true_skips_invalid_keeps_valid(self, tmp_path: Path) -> None:
+        """verify=True の場合、不正ファイルのみスキップし正常ファイルは保持する。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        # 正常ファイル（2024.parquet）
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        # 不正ファイル（2025.parquet）
+        invalid_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2025.parquet"
+        _write_invalid_parquet(invalid_path)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
+        assert len(df) == 3, f"正常ファイルの行が失われた: {len(df)} 行"
+
+    def test_verify_true_all_invalid_returns_empty(self, tmp_path: Path) -> None:
+        """verify=True の場合、全ファイルが不正なら空の DataFrame を返す。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        invalid_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2024.parquet"
+        _write_invalid_parquet(invalid_path)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
+        assert df.empty, "全不正ファイルなのに空 DataFrame が返らなかった"

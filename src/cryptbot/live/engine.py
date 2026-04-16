@@ -304,6 +304,7 @@ class LiveEngine:
             new_signal, data, current_bar_ts,
             self._ml_model, self._degradation_detector,
             self._ml_confidence_threshold,
+            fail_closed=True,
         )
 
         # ---- CVaR フィルター ----
@@ -458,6 +459,7 @@ class LiveEngine:
             data = self._storage.load_ohlcv(
                 pair=self._settings.pair,
                 timeframe=self._settings.timeframe,
+                verify=True,
             )
             if len(data) < needed:
                 logger.warning(

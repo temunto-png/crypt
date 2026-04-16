@@ -72,6 +72,62 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_ml_components(settings):
+    """ML モデルと劣化検知器を組み立てる。
+
+    Args:
+        settings: Settings インスタンス
+
+    Returns:
+        (ml_model, degradation_detector) タプル。
+        enabled=False の場合は (None, None)。
+        enabled=True でモデル未検出の場合は None（fail-closed シグナル）。
+    """
+    from cryptbot.models.degradation_detector import DegradationDetector
+    from cryptbot.models.experiment_manager import ExperimentManager
+
+    model_settings = settings.model
+    if not model_settings.enabled:
+        return (None, None)
+
+    if model_settings.model_type == "lgbm":
+        from cryptbot.models.lgbm_model import LightGBMModel
+        model_cls = LightGBMModel
+    else:
+        from cryptbot.models.xgb_model import XGBoostModel
+        model_cls = XGBoostModel
+
+    manager = ExperimentManager(base_dir=model_settings.experiments_dir)
+
+    if model_settings.active_experiment_id is not None:
+        try:
+            ml_model = manager.load_model(model_settings.active_experiment_id, model_cls)
+            records = [r for r in manager.list_experiments()
+                       if r.experiment_id == model_settings.active_experiment_id]
+            baseline = records[0].metrics.get("accuracy", 0.6) if records else 0.6
+        except FileNotFoundError:
+            logger.error("ML モデルが見つかりません: %s", model_settings.active_experiment_id)
+            return None
+    else:
+        records = manager.list_experiments()
+        if not records:
+            logger.error("ML が enabled ですが実験記録が見つかりません（experiments_dir=%s）",
+                         model_settings.experiments_dir)
+            return None
+        ml_model = manager.load_latest_model(model_cls)
+        if ml_model is None:
+            logger.error("ML が enabled ですがモデルファイルのロードに失敗しました")
+            return None
+        baseline = records[0].metrics.get("accuracy", 0.6)
+
+    degradation_detector = DegradationDetector(
+        baseline_confidence=baseline,
+        window=model_settings.degradation_window,
+        drop_threshold_pct=model_settings.degradation_drop_pct,
+    )
+    return (ml_model, degradation_detector)
+
+
 def _run_paper(args: argparse.Namespace) -> int:
     """paper モードで 1 バー処理する。"""
     from cryptbot.config.settings import load_settings
@@ -98,6 +154,12 @@ def _run_paper(args: argparse.Namespace) -> int:
     )
     strategy = _resolve_strategy(settings.paper.strategy_name)
 
+    ml_result = _build_ml_components(settings)
+    if ml_result is None:
+        print("[ERROR] ML が enabled ですがモデルが見つかりません。", file=sys.stderr)
+        return 1
+    ml_model, degradation_detector = ml_result
+
     state_store = PaperStateStore(storage)
     state_store.initialize()
 
@@ -107,6 +169,9 @@ def _run_paper(args: argparse.Namespace) -> int:
         state_store=state_store,
         storage=storage,
         settings=settings.paper,
+        ml_model=ml_model,
+        degradation_detector=degradation_detector,
+        ml_confidence_threshold=settings.model.confidence_threshold,
     )
 
     # OHLCV データを Storage から読み込む（warmup + 1 本）
@@ -190,6 +255,12 @@ def _run_live(args: argparse.Namespace) -> int:
     )
     strategy = _resolve_strategy(settings.live.strategy_name)
 
+    ml_result = _build_ml_components(settings)
+    if ml_result is None:
+        print("[ERROR] ML が enabled ですがモデルが見つかりません。", file=sys.stderr)
+        return 1
+    ml_model, degradation_detector = ml_result
+
     state_store = LiveStateStore(storage)
     state_store.initialize()
 
@@ -206,6 +277,9 @@ def _run_live(args: argparse.Namespace) -> int:
         storage=storage,
         executor=executor,
         settings=settings.live,
+        ml_model=ml_model,
+        degradation_detector=degradation_detector,
+        ml_confidence_threshold=settings.model.confidence_threshold,
     )
 
     async def _live_async() -> None:

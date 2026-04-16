@@ -514,6 +514,7 @@ class Storage:
         timeframe: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        verify: bool = False,
     ) -> pd.DataFrame:
         """条件に合う Parquet を読み込み結合して返す。
 
@@ -522,6 +523,7 @@ class Storage:
           timeframe: 時間足
           start: フィルタ開始日時（timezone-aware）
           end: フィルタ終了日時（timezone-aware）
+          verify: True の場合、ファイル単位で整合性検証を行い、失敗したファイルをスキップする。
 
         Returns:
           OHLCV DataFrame（timestamp 昇順）。データなしの場合は空 DataFrame。
@@ -529,6 +531,9 @@ class Storage:
         Raises:
           ValueError: start/end が timezone-naive の場合
         """
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+
         if start is not None and start.tzinfo is None:
             raise ValueError("start には timezone-aware な datetime が必要です。")
         if end is not None and end.tzinfo is None:
@@ -545,7 +550,14 @@ class Storage:
         frames: list[pd.DataFrame] = []
         for fp in parquet_files:
             table = pq.read_table(fp, schema=_OHLCV_SCHEMA)
-            frames.append(table.to_pandas())
+            file_df = table.to_pandas()
+            if verify:
+                try:
+                    validate_ohlcv(file_df)
+                except ValueError as exc:
+                    _logger.warning("load_ohlcv: 整合性検証失敗 (%s) → スキップ: %s", fp.name, exc)
+                    continue
+            frames.append(file_df)
 
         if not frames:
             return _empty_ohlcv_df()
