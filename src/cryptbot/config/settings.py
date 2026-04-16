@@ -88,6 +88,7 @@ class LiveSettings(BaseModel):
     balance_sync_tolerance_pct: float = Field(default=0.001, gt=0, lt=1)
     order_timeout_sec: int = Field(default=7200, ge=300)
     min_order_size_btc: float = Field(default=0.0001, gt=0)
+    ohlcv_backfill_years: int = Field(default=2, ge=1)
 
 
 class ModelSettings(BaseModel):
