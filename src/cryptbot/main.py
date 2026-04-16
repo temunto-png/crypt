@@ -223,6 +223,9 @@ def _run_live(args: argparse.Namespace) -> int:
     from cryptbot.live.state import LiveStateStore
     from cryptbot.risk.kill_switch import KillSwitch
     from cryptbot.risk.manager import RiskManager
+    from cryptbot.exchanges.bitbank import BitbankExchange
+    from cryptbot.data.fetcher import DataFetcher
+    from cryptbot.data.ohlcv_updater import OhlcvUpdater
 
     settings = load_settings()
 
@@ -232,6 +235,16 @@ def _run_live(args: argparse.Namespace) -> int:
 
     storage = Storage(db_path=db_path, data_dir=data_dir)
     storage.initialize()
+
+    # Public API 用 Exchange（OHLCV バックフィル + 定期更新）
+    pub_exchange = BitbankExchange()
+    fetcher = DataFetcher(exchange=pub_exchange, storage=storage)
+    ohlcv_updater = OhlcvUpdater(
+        fetcher=fetcher,
+        pair=settings.live.pair,
+        timeframe=settings.live.timeframe,
+        backfill_years=settings.live.ohlcv_backfill_years,
+    )
 
     kill_switch = KillSwitch(storage)
 
@@ -280,10 +293,22 @@ def _run_live(args: argparse.Namespace) -> int:
         ml_model=ml_model,
         degradation_detector=degradation_detector,
         ml_confidence_threshold=settings.model.confidence_threshold,
+        ohlcv_updater=ohlcv_updater,
     )
 
     async def _live_async() -> None:
         """API 疎通確認後にエンジンを起動する（単一イベントループ）。"""
+        # OHLCV バックフィル（失敗時は LiveGateError として再 raise → return 1）
+        try:
+            n = await ohlcv_updater.backfill()
+            print(
+                f"[INFO] OHLCV バックフィル完了: {n} 本 "
+                f"pair={settings.live.pair} tf={settings.live.timeframe}"
+            )
+        except Exception as exc:
+            print(f"[ERROR] OHLCV バックフィル失敗: {exc}", file=sys.stderr)
+            raise LiveGateError(str(exc)) from exc
+
         try:
             assets = await verify_api_permissions(exchange)
         except LiveGateError as exc:

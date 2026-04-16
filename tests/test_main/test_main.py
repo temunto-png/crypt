@@ -248,3 +248,34 @@ class TestBuildMlComponents:
         )
         result = _build_ml_components(settings)
         assert result is None
+
+
+class TestOhlcvBackfill:
+    def test_backfill_failure_returns_1(self, tmp_path: Path, monkeypatch) -> None:
+        """OHLCV バックフィル失敗時に main が 1 を返す。"""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from cryptbot.exchanges.base import ExchangeError
+
+        monkeypatch.setenv("CRYPT_MODE", "live")
+        monkeypatch.setenv("CRYPT_BITBANK_API_KEY", "test_key")
+        monkeypatch.setenv("CRYPT_BITBANK_API_SECRET", "test_secret")
+
+        db_path = tmp_path / "live.db"
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        mock_updater = MagicMock()
+        mock_updater.backfill = AsyncMock(side_effect=ExchangeError("API timeout"))
+
+        with (
+            patch("cryptbot.live.gate.phase_4_gate"),
+            patch("cryptbot.exchanges.bitbank_private.BitbankPrivateExchange"),
+            patch("cryptbot.exchanges.bitbank.BitbankExchange"),
+            patch("cryptbot.data.fetcher.DataFetcher"),
+            patch("cryptbot.data.ohlcv_updater.OhlcvUpdater", return_value=mock_updater),
+        ):
+            result = main(["--mode", "live", "--confirm-live",
+                           "--db", str(db_path), "--data-dir", str(data_dir)])
+
+        assert result == 1
