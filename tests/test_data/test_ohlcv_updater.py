@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cryptbot.data.ohlcv_updater import OhlcvUpdater
+from cryptbot.exchanges.base import ExchangeError
 
 
 @pytest.fixture()
@@ -56,7 +57,6 @@ class TestBackfill:
     @pytest.mark.asyncio
     async def test_backfill_propagates_api_error(self, mock_fetcher: MagicMock) -> None:
         """API エラーは例外をそのまま伝播する（fail-closed）。"""
-        from cryptbot.exchanges.base import ExchangeError
         mock_fetcher.fetch_and_store = AsyncMock(side_effect=ExchangeError("API error"))
 
         with patch("cryptbot.data.ohlcv_updater.datetime") as mock_dt:
@@ -119,7 +119,6 @@ class TestUpdateLatest:
         self, mock_fetcher: MagicMock
     ) -> None:
         """API エラー時は例外を握りつぶして False を返す（fail-open）。"""
-        from cryptbot.exchanges.base import ExchangeError
         mock_fetcher.fetch_and_store = AsyncMock(side_effect=ExchangeError("timeout"))
 
         with patch("cryptbot.data.ohlcv_updater.datetime") as mock_dt:
