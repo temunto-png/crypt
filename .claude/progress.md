@@ -108,6 +108,73 @@
 | `tests/test_live/test_engine.py` | LiveEngine run_one_bar / partial fill / graceful shutdown テスト |
 | `tests/test_main/test_main.py` | live gate 失敗テスト更新（LiveTradingNotImplementedError → return 1） |
 
+## 次セッション引継ぎ（2026-04-17 時点）
+
+### 優先順
+
+#### 1. vector search 有効化（5分）
+
+Claude Code を完全再起動すると SessionStart hook の `smart-install.js` が `~/.local/bin/uv` を自動検出する可能性が高い。
+
+```bash
+# 再起動後に確認
+curl -sf http://localhost:37777/health
+# MCP ツールで /mem-search "Binance" を試す
+```
+
+依然失敗する場合 → `~/.claude-mem/settings.json` に `CLAUDE_MEM_UV_PATH` の設定項目があるか確認し、`C:/Users/temun/.local/bin/uv.exe` を明示指定する。
+
+#### 2. MP-01 / MP-03 完了（10分）
+
+vector search 不可の場合は FTS で代用：
+
+```bash
+# 誤情報（Binance, id=6）を検索・削除
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" \
+  "SELECT id, title FROM observations WHERE narrative LIKE '%Binance%';"
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "DELETE FROM observations WHERE id=6;"
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "SELECT id FROM observations WHERE id=6;"
+# → 何も返らなければ PASS
+```
+
+完了後、`docs/claude_mem_security_tests.md` と `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新する。
+
+#### 3. crypt Important A の修正
+
+- **ファイル**: `src/cryptbot/live/engine.py` — `_poll_active_orders()` の result 処理ブロック
+- **問題**: `TIMEOUT_CANCELLED` かつ `executed_amount > 0` のとき LiveState が更新されない。BUY が部分約定後にタイムアウトキャンセルされると `position_size = 0` のまま BTC が取引所に残る
+- **修正箇所**: `CANCELED_PARTIALLY_FILLED` の elif チェーンの直後に追加
+  ```python
+  elif result.status == "TIMEOUT_CANCELLED" and result.executed_amount > 0:
+      # CANCELED_PARTIALLY_FILLED と同じ LiveState 更新ロジック
+  ```
+- **追加テスト**: `test_timeout_cancelled_buy_with_partial_fill_updates_live_state`
+
+#### 4. crypt Important B の修正
+
+- **ファイル**: `src/cryptbot/execution/live_executor.py:119-127` — `place_order()` validation
+- **問題**: `isinstance(raw_order_id, (int, float))` が `""` / `"0"` を通過させる
+- **修正**:
+  ```python
+  if not raw_order_id or not str(raw_order_id).strip() or int(str(raw_order_id)) <= 0:
+  ```
+- **追加テスト**: `test_empty_string_order_id_results_in_submit_failed`
+
+#### 5. master マージ
+
+Important A / B 修正後:
+```bash
+cd C:/tool/claude/crypt
+python -m pytest -q  # 657+ passed を確認
+git add src/cryptbot/live/engine.py src/cryptbot/execution/live_executor.py tests/...
+git commit -m "fix: TIMEOUT_CANCELLED LiveState update and empty order_id validation"
+git checkout master
+git merge feat/startup-recovery-hardening
+git push origin master
+```
+
+---
+
 ## 次のアクション
 
 1. ~~**P2 実装を開始**~~（完了）
