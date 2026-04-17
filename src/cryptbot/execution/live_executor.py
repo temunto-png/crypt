@@ -116,7 +116,15 @@ class LiveExecutor(BaseExecutor):
         # ステップ 2: 取引所に注文送信
         try:
             result = await self._exchange.place_order(pair, side, order_type, size, price)
-            exchange_order_id: str = str(result.get("order_id", ""))
+            raw_order_id = result.get("order_id")
+
+            # order_id が存在し、かつ数値の場合は値が > 0 であることを確認
+            if raw_order_id is None or (isinstance(raw_order_id, (int, float)) and raw_order_id <= 0):
+                raise ValueError(
+                    f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                )
+
+            exchange_order_id: str = str(raw_order_id)
 
             # CREATED → SUBMITTED
             self._storage.update_order_status(
