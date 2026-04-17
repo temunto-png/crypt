@@ -2,12 +2,73 @@
 
 ## 現在のフェーズ
 
-**ポジション同期（リカバリー）実装完了**
+**claude-mem 導入 Phase 1 進行中（セキュリティテスト実施中）**
 
-- テスト数: **638 passed**
-- ブランチ: `master`（HEAD = `566c065`、未コミット変更あり）
-- 状態: 起動リカバリー実装完了（未コミット）
+- テスト数: **655 passed**（crypt 本体は変更なし）
+- ブランチ: `feat/startup-recovery-hardening`（base = `53a3a51`）— crypt 本体の Important 2件はまだ未修正
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
+
+## claude-mem 導入状況（2026-04-17）
+
+### Phase 0: 完了
+
+| 項目 | 状態 |
+|---|---|
+| Bun v1.3.12 | winget でインストール済み |
+| claude-mem v12.1.6 | npx 経由でプラグインインストール済み |
+| `WORKER_HOST` | `127.0.0.1` 確認済み |
+| `PROVIDER` | `claude` のみ |
+| `EXCLUDED_PROJECTS` | NEM Wallet / NanoWallet / ai-diagnosis-platform / Kink Vision（settings.json + PowerShell profile） |
+| `CHROMA_ENABLED` | `false`（初期 PoC は SQLite のみ） |
+| `MODE` | `code--ja` |
+| hooks.json | Setup / SessionStart / UserPromptSubmit / PostToolUse(*) / PreToolUse(Read) / Stop / SessionEnd |
+| rollback バックアップ | `~/.claude/settings.json.backup-before-claude-mem-2026-04-17` |
+
+### Phase 1: セキュリティテスト結果（2026-04-17）
+
+| テスト | 結果 | 備考 |
+|---|---|---|
+| SL-01: DB secret スキャン | **PASS** | sk-/ghp_/api_key/password パターン検出なし |
+| SL-02: tool output secret 保存確認 | **PASS** | ダミー secret（sk-test-AAA/mysecret）は narrative/text/facts に保存されず。LLM要約のみ保存 |
+| SL-03: 個別 observation 削除 | **PASS** | `DELETE FROM observations WHERE id=X` で削除・確認できた |
+| MP-01: 誤情報注入テスト | **未完了** | Binance 誤情報を手動挿入済み。次セッションで search で検出・訂正できるか確認要 |
+| MP-03: 有害 memory 削除 | **未完了** | uv 未インストールによりセマンティック検索不可。FTS 検索は動作中 |
+
+### 重要メモ: uv インストール済み・vector search 未解決
+
+- uv 0.11.7 を `~/.local/bin` にインストール済み（2026-04-17）
+- worker 再起動済みだが "Vector search failed" のまま
+- `smart-install.js` が `~/.local/bin` の uv を検索するコードを確認済み
+- **原因推定**: worker プロセスの PATH に `~/.local/bin` が含まれていない。次の Claude Code セッション起動時に SessionStart hook 経由で `smart-install.js` が自動検出する可能性がある
+
+**次セッションで対応:**
+1. Claude Code を完全再起動 → SessionStart hook で smart-install.js が uv を自動検出するか確認
+2. 解決しない場合: claude-mem settings.json に `CLAUDE_MEM_UV_PATH` 等の設定項目があるか確認
+3. MP-01 誤情報（Binance, id=6）を search で検出・削除して MP-03 完了
+4. crypt Important A / B を修正して master マージ
+
+### Phase 1 残タスク
+
+- [x] uv インストール（v0.11.7、`~/.local/bin`）
+- [ ] Claude Code 完全再起動 → vector search 有効化確認
+- [ ] MP-01: 誤情報注入後の回答品質確認
+- [ ] MP-03: 有害 memory 特定・削除確認（vector search 有効化後）
+- [ ] `docs/claude_mem_security_tests.md` に結果を記入
+- [ ] `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新
+
+### 作成済みドキュメント
+
+| ファイル | 内容 |
+|---|---|
+| `docs/claude_mem_rollout_checklist.md` | Phase 0〜2 チェックリスト（Phase 0 完了済み） |
+| `docs/claude_mem_repo_registry.md` | 対象/除外 repo・owner・削除責任者 |
+| `docs/claude_mem_karpathy_rules_proposal.md` | andrej-karpathy-skills 最小差分提案 |
+| `docs/claude_mem_golden_tasks.md` | memory on/off 比較用 5 タスク |
+| `docs/claude_mem_security_tests.md` | secret leakage / memory poisoning テスト手順 |
+| `docs/magika_poc_plan.md` | Magika PoC 計画 |
+| `docs/cognee_poc_plan.md` | cognee 比較 PoC 計画 |
+| `docs/open_agents_threat_model.md` | open-agents threat model |
+| `docs/claude_mem_rollback_and_deps.md` | rollback 手順 / dependency review |
 
 ## リポジトリ
 
@@ -54,8 +115,23 @@
 3. ~~**OHLCV 自動投入**~~（完了 — OhlcvUpdater 実装・LiveEngine 注入・バックフィル追加）
 4. ~~**P2（F4/F5/F6）実装**~~（完了 — commit d85de98・テスト 601 passed）
 5. ~~**詳細敵対的レビュー対応（NF1〜NF7）**~~（完了 — commit 未 push）
-6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed、未コミット）
-7. 本番起動準備
+6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed）
+7. ~~**起動リカバリー堅牢化（P1/P2/P3）**~~ — 8/8 タスク完了、残2件対応後 master マージ
+8. **【次セッション】残 Important 2件を修正して master にマージ** → 本番起動準備
+
+### 次セッションで対応する Important 2件
+
+#### A: `TIMEOUT_CANCELLED` で LiveState が更新されない
+- **場所**: `src/cryptbot/live/engine.py` — `_poll_active_orders()` の result 処理ブロック（`FULLY_FILLED` / `CANCELED_PARTIALLY_FILLED` の elif チェーン）
+- **問題**: `handle_partial_fill()` が `status="TIMEOUT_CANCELLED"` を返しても engine 側に処理分岐がない。BUY が部分約定済みでタイムアウトキャンセルされた場合 `LiveState.position_size = 0` のままで BTC が取引所に残る
+- **修正**: `CANCELED_PARTIALLY_FILLED` ブランチと同じ LiveState 更新ロジックを `elif result.status == "TIMEOUT_CANCELLED" and result.executed_amount > 0:` で追加
+- **テスト**: `test_timeout_cancelled_buy_with_partial_fill_updates_live_state`
+
+#### B: `exchange_order_id` 空文字列が検証をすり抜ける
+- **場所**: `src/cryptbot/execution/live_executor.py:119-127` — `place_order()` validation
+- **問題**: `isinstance(raw_order_id, (int, float))` チェックが文字列 `""` / `"0"` を通過させる
+- **修正**: `if not raw_order_id or not str(raw_order_id).strip() or int(str(raw_order_id)) <= 0:`
+- **テスト**: `test_empty_string_order_id_results_in_submit_failed`
 
 ---
 
