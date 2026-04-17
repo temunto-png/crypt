@@ -398,6 +398,7 @@ class LiveEngine:
                     created_at_iso=str(order["created_at"]),
                     partial_fill_timeout_sec=self._settings.order_timeout_sec,
                     side=str(order.get("side", "")),
+                    current_db_status=str(order.get("status", "SUBMITTED")),
                 )
             except Exception:
                 logger.exception(

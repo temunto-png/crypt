@@ -189,6 +189,7 @@ class LiveExecutor(BaseExecutor):
         created_at_iso: str,
         partial_fill_timeout_sec: int,
         side: str = "",
+        current_db_status: str = "SUBMITTED",
     ) -> OrderSyncResult:
         """PARTIAL_FILLED 注文の状態を1回取得して更新する（ワンショット）。
 
@@ -240,12 +241,35 @@ class LiveExecutor(BaseExecutor):
         if exchange_status == "PARTIALLY_FILLED":
             fill_amount = float(order_data.get("executed_amount", 0))
             avg_price = float(order_data.get("average_price", 0))
-            self._storage.update_order_status(
-                db_order_id,
-                "PARTIAL",
-                fill_price=avg_price,
-                fill_size=fill_amount,
-            )
+
+            # タイムアウト判定を PARTIALLY_FILLED 分岐内で先行させる
+            created_at = datetime.fromisoformat(created_at_iso)
+            elapsed = (datetime.now(tz=JST) - created_at).total_seconds()
+            if elapsed > partial_fill_timeout_sec:
+                await self.cancel_order(pair, str(db_order_id))
+                return OrderSyncResult(
+                    db_order_id=db_order_id,
+                    side=side,
+                    status="TIMEOUT_CANCELLED",
+                    executed_amount=fill_amount,
+                    average_price=avg_price,
+                    terminal=True,
+                )
+
+            # DB が既に PARTIAL なら冪等スナップショット更新、そうでなければ通常遷移
+            if current_db_status == "PARTIAL":
+                self._storage.update_order_fill_snapshot(
+                    db_order_id,
+                    fill_price=avg_price,
+                    fill_size=fill_amount,
+                )
+            else:
+                self._storage.update_order_status(
+                    db_order_id,
+                    "PARTIAL",
+                    fill_price=avg_price,
+                    fill_size=fill_amount,
+                )
             self._storage.insert_order_event(
                 db_order_id,
                 "PARTIAL_FILL",
@@ -279,7 +303,7 @@ class LiveExecutor(BaseExecutor):
                 terminal=True,
             )
 
-        # タイムアウトチェック: 超過していれば残量キャンセル
+        # タイムアウトチェック: 超過していれば残量キャンセル（UNFILLED 等の非 PARTIALLY_FILLED ケース）
         created_at = datetime.fromisoformat(created_at_iso)
         elapsed = (datetime.now(tz=JST) - created_at).total_seconds()
         if elapsed > partial_fill_timeout_sec:

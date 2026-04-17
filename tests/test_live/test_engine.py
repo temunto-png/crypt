@@ -434,6 +434,7 @@ class TestPollPartialFills:
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
             side="",
+            current_db_status="PARTIAL",
         )
 
     @pytest.mark.asyncio
@@ -460,6 +461,7 @@ class TestPollPartialFills:
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
             side="",
+            current_db_status="SUBMITTED",
         )
 
     @pytest.mark.asyncio
