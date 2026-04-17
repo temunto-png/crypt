@@ -205,6 +205,9 @@ class LiveExecutor(BaseExecutor):
             created_at_iso: 注文作成時刻（ISO 文字列）
             partial_fill_timeout_sec: タイムアウト秒数（LiveSettings から取得）
             side: 注文サイド（"BUY" or "SELL"）
+            current_db_status: DB 上の現在の注文ステータス。"PARTIAL" の場合は
+                update_order_fill_snapshot() を使い PARTIAL→PARTIAL の状態遷移エラーを回避する。
+                省略時は "SUBMITTED" として扱う。
         """
         order_data = await self._exchange.get_order(pair, exchange_order_id)
         exchange_status = order_data.get("status", "")
