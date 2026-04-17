@@ -2,7 +2,7 @@
 
 BTC/JPY 現物 Long-only の自動売買システム。
 
-**現在のフェーズ**: バックテスト・基盤実装完了。Paper trade エンジンは未実装。
+**現在のフェーズ**: バックテスト・Paper trade・Live trade 実装完了。
 
 ## 前提
 
@@ -33,20 +33,15 @@ pytest
 # ヘルプ表示
 python -m cryptbot.main --help
 
-# paper モード（現在は「未実装」メッセージを表示して終了）
-python -m cryptbot.main
+# paper モード（シミュレーション売買）
+python -m cryptbot.main --config config.yaml --mode paper
 ```
 
-> **注意**: paper trade エンジンは未実装です。`python -m cryptbot.main` を実行しても
-> 取引は行われません。バックテストの実行は `src/cryptbot/backtest/engine.py` を参照してください。
-
-## バックテスト後の Live 移行条件について
-
-以下を**全て**満たすまで live 取引を開始しない（現時点では live モードも未実装）。
+> **注意**: 本番取引（live mode）実行時は、少なくとも 2 週間の paper trade 実績と 起動前チェックリスト を確認してください。
 
 ## Live 移行条件チェックリスト
 
-以下を**全て**満たすまで live 取引を開始しない（paper engine 実装後に適用）:
+以下を**全て**満たすまで live 取引を開始しない:
 
 - [ ] バックテストで手数料・スリッページ込み期待値がプラス（bootstrap CI 下限 > 0）
 - [ ] Buy & Hold よりリスク調整後成績が良い
@@ -61,15 +56,41 @@ python -m cryptbot.main
 - [ ] API キーに出金権限がないことを確認した
 - [ ] ユーザーが明示的に live 移行を許可した
 
-## Live 移行手順（未実装）
+## Live 運用
 
-live モードは未実装です。将来実装時は以下を想定:
+### 起動前チェックリスト
+
+1. `config.yaml` の `mode: live` と `pair: btc_jpy` を確認する
+2. `.env` に `BITBANK_API_KEY` / `BITBANK_API_SECRET` が設定されていることを確認する
+3. bitbank の API キーに **出金権限がない** ことを確認する
+4. paper モードで少なくとも 2 週間動作実績があることを確認する
+
+### 起動コマンド
 
 ```bash
-# 両方の条件が揃った場合のみ live 起動可能（現在は実行不可）
-export CRYPT_MODE=live
-python -m cryptbot.main --confirm-live
+python -m cryptbot.main --config config.yaml --mode live
 ```
+
+### 起動リカバリー動作
+
+再起動時、エンジンは以下の順序で自動リカバリーを行う:
+
+1. `CREATED`（exchange_order_id なし）→ ローカルキャンセル + order_events 記録
+2. `SUBMITTED` / `PARTIAL` → 取引所照合 → DB と LiveState を最新化
+3. 残高照合 → 乖離が許容差を超える場合は fail-close（手動確認を要求）
+
+### 手動復旧が必要なケース
+
+- LiveState が存在しない状態で BTC 残高がある（初回起動時の異常）
+- `exchange_order_id` が空の `SUBMITTED` 注文が残っている
+- 残高乖離が `balance_sync_tolerance_pct` を超えている
+
+上記の場合、ログに詳細が出力されるので、`LiveState` ファイルを手動で編集後に再起動する。
+
+### Kill Switch
+
+プロセスに `SIGINT`（Ctrl+C）または `SIGTERM` を送ると graceful shutdown する。
+既存の open orders はキャンセルされない。手動で bitbank の管理画面から確認すること。
 
 ## ディレクトリ構成
 
@@ -81,8 +102,8 @@ crypt/
     strategies/       # 取引戦略
     risk/             # リスク管理・Kill Switch
     backtest/         # バックテストエンジン
-    paper/            # Paper trade エンジン（未実装）
-    execution/        # 注文執行（未実装）
+    paper/            # Paper trade エンジン
+    live/             # Live trade エンジン
     reports/          # レポート生成
     utils/            # ユーティリティ
   tests/              # テスト

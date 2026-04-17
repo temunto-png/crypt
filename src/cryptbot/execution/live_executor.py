@@ -116,7 +116,33 @@ class LiveExecutor(BaseExecutor):
         # ステップ 2: 取引所に注文送信
         try:
             result = await self._exchange.place_order(pair, side, order_type, size, price)
-            exchange_order_id: str = str(result.get("order_id", ""))
+            raw_order_id = result.get("order_id")
+
+            # order_id の検証: None・空文字・0 以下を拒否
+            # isinstance(str) チェックでは空文字列 "" や "0" を検出できないため
+            # 文字列変換後の値も確認する。
+            _oid_str = str(raw_order_id).strip() if raw_order_id is not None else ""
+            if not _oid_str:
+                raise ValueError(
+                    f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                )
+            if isinstance(raw_order_id, (int, float)) and raw_order_id <= 0:
+                raise ValueError(
+                    f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                )
+            if isinstance(raw_order_id, str):
+                # 数値文字列の場合のみ値チェック（"EX-001" 等の非数値文字列は許容）
+                try:
+                    if int(_oid_str) <= 0:
+                        raise ValueError(
+                            f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                        )
+                except (OverflowError, ValueError) as exc:
+                    if "order_id" in str(exc):
+                        raise  # 上の if 節で raise した ValueError を再送出
+                    # int() 変換失敗（非数値文字列）= 有効な ID として許容
+
+            exchange_order_id: str = str(raw_order_id)
 
             # CREATED → SUBMITTED
             self._storage.update_order_status(
@@ -189,6 +215,7 @@ class LiveExecutor(BaseExecutor):
         created_at_iso: str,
         partial_fill_timeout_sec: int,
         side: str = "",
+        current_db_status: str = "SUBMITTED",
     ) -> OrderSyncResult:
         """PARTIAL_FILLED 注文の状態を1回取得して更新する（ワンショット）。
 
@@ -204,6 +231,9 @@ class LiveExecutor(BaseExecutor):
             created_at_iso: 注文作成時刻（ISO 文字列）
             partial_fill_timeout_sec: タイムアウト秒数（LiveSettings から取得）
             side: 注文サイド（"BUY" or "SELL"）
+            current_db_status: DB 上の現在の注文ステータス。"PARTIAL" の場合は
+                update_order_fill_snapshot() を使い PARTIAL→PARTIAL の状態遷移エラーを回避する。
+                省略時は "SUBMITTED" として扱う。
         """
         order_data = await self._exchange.get_order(pair, exchange_order_id)
         exchange_status = order_data.get("status", "")
@@ -240,12 +270,35 @@ class LiveExecutor(BaseExecutor):
         if exchange_status == "PARTIALLY_FILLED":
             fill_amount = float(order_data.get("executed_amount", 0))
             avg_price = float(order_data.get("average_price", 0))
-            self._storage.update_order_status(
-                db_order_id,
-                "PARTIAL",
-                fill_price=avg_price,
-                fill_size=fill_amount,
-            )
+
+            # タイムアウト判定を PARTIALLY_FILLED 分岐内で先行させる
+            created_at = datetime.fromisoformat(created_at_iso)
+            elapsed = (datetime.now(tz=JST) - created_at).total_seconds()
+            if elapsed > partial_fill_timeout_sec:
+                await self.cancel_order(pair, str(db_order_id))
+                return OrderSyncResult(
+                    db_order_id=db_order_id,
+                    side=side,
+                    status="TIMEOUT_CANCELLED",
+                    executed_amount=fill_amount,
+                    average_price=avg_price,
+                    terminal=True,
+                )
+
+            # DB が既に PARTIAL なら冪等スナップショット更新、そうでなければ通常遷移
+            if current_db_status == "PARTIAL":
+                self._storage.update_order_fill_snapshot(
+                    db_order_id,
+                    fill_price=avg_price,
+                    fill_size=fill_amount,
+                )
+            else:
+                self._storage.update_order_status(
+                    db_order_id,
+                    "PARTIAL",
+                    fill_price=avg_price,
+                    fill_size=fill_amount,
+                )
             self._storage.insert_order_event(
                 db_order_id,
                 "PARTIAL_FILL",
@@ -279,7 +332,7 @@ class LiveExecutor(BaseExecutor):
                 terminal=True,
             )
 
-        # タイムアウトチェック: 超過していれば残量キャンセル
+        # タイムアウトチェック: 超過していれば残量キャンセル（UNFILLED 等の非 PARTIALLY_FILLED ケース）
         created_at = datetime.fromisoformat(created_at_iso)
         elapsed = (datetime.now(tz=JST) - created_at).total_seconds()
         if elapsed > partial_fill_timeout_sec:

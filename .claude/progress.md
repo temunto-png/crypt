@@ -2,12 +2,73 @@
 
 ## 現在のフェーズ
 
-**ポジション同期（リカバリー）実装完了**
+**Important A/B 修正完了・master マージ待ち**
 
-- テスト数: **638 passed**
-- ブランチ: `master`（HEAD = `566c065`、未コミット変更あり）
-- 状態: 起動リカバリー実装完了（未コミット）
+- テスト数: **659 passed**
+- ブランチ: `feat/startup-recovery-hardening`（base = `53a3a51`）— Important A/B 修正済み
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
+
+## claude-mem 導入状況（2026-04-17）
+
+### Phase 0: 完了
+
+| 項目 | 状態 |
+|---|---|
+| Bun v1.3.12 | winget でインストール済み |
+| claude-mem v12.1.6 | npx 経由でプラグインインストール済み |
+| `WORKER_HOST` | `127.0.0.1` 確認済み |
+| `PROVIDER` | `claude` のみ |
+| `EXCLUDED_PROJECTS` | NEM Wallet / NanoWallet / ai-diagnosis-platform / Kink Vision（settings.json + PowerShell profile） |
+| `CHROMA_ENABLED` | `false`（初期 PoC は SQLite のみ） |
+| `MODE` | `code--ja` |
+| hooks.json | Setup / SessionStart / UserPromptSubmit / PostToolUse(*) / PreToolUse(Read) / Stop / SessionEnd |
+| rollback バックアップ | `~/.claude/settings.json.backup-before-claude-mem-2026-04-17` |
+
+### Phase 1: セキュリティテスト結果（2026-04-17）
+
+| テスト | 結果 | 備考 |
+|---|---|---|
+| SL-01: DB secret スキャン | **PASS** | sk-/ghp_/api_key/password パターン検出なし |
+| SL-02: tool output secret 保存確認 | **PASS** | ダミー secret（sk-test-AAA/mysecret）は narrative/text/facts に保存されず。LLM要約のみ保存 |
+| SL-03: 個別 observation 削除 | **PASS** | `DELETE FROM observations WHERE id=X` で削除・確認できた |
+| MP-01: 誤情報注入テスト | **PASS** | FTS 検索で id=6 の Binance 誤情報を正しく検出（2026-04-18） |
+| MP-03: 有害 memory 削除 | **PASS** | id=6 を DELETE 後、SELECT 空返却確認（2026-04-18） |
+
+### 重要メモ: uv インストール済み・vector search 未解決
+
+- uv 0.11.7 を `~/.local/bin` にインストール済み（2026-04-17）
+- worker 再起動済みだが "Vector search failed" のまま
+- `smart-install.js` が `~/.local/bin` の uv を検索するコードを確認済み
+- **原因推定**: worker プロセスの PATH に `~/.local/bin` が含まれていない。次の Claude Code セッション起動時に SessionStart hook 経由で `smart-install.js` が自動検出する可能性がある
+
+**次セッションで対応:**
+1. Claude Code を完全再起動 → SessionStart hook で smart-install.js が uv を自動検出するか確認
+2. 解決しない場合: claude-mem settings.json に `CLAUDE_MEM_UV_PATH` 等の設定項目があるか確認
+3. MP-01 誤情報（Binance, id=6）を search で検出・削除して MP-03 完了
+4. crypt Important A / B を修正して master マージ
+
+### Phase 1 残タスク
+
+- [x] uv インストール（v0.11.7、`~/.local/bin`）
+- [ ] Claude Code 完全再起動 → vector search 有効化確認（任意、FTS で代替確認済み）
+- [x] MP-01: 誤情報注入後の回答品質確認（FTS で PASS、2026-04-18）
+- [x] MP-03: 有害 memory 特定・削除確認（PASS、2026-04-18）
+- [x] `docs/claude_mem_security_tests.md` に結果を記入（2026-04-18）
+- [x] `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新（2026-04-18）
+
+### 作成済みドキュメント
+
+| ファイル | 内容 |
+|---|---|
+| `docs/claude_mem_rollout_checklist.md` | Phase 0〜2 チェックリスト（Phase 0 完了済み） |
+| `docs/claude_mem_repo_registry.md` | 対象/除外 repo・owner・削除責任者 |
+| `docs/claude_mem_karpathy_rules_proposal.md` | andrej-karpathy-skills 最小差分提案 |
+| `docs/claude_mem_golden_tasks.md` | memory on/off 比較用 5 タスク |
+| `docs/claude_mem_security_tests.md` | secret leakage / memory poisoning テスト手順 |
+| `docs/magika_poc_plan.md` | Magika PoC 計画 |
+| `docs/cognee_poc_plan.md` | cognee 比較 PoC 計画 |
+| `docs/open_agents_threat_model.md` | open-agents threat model |
+| `docs/claude_mem_rollback_and_deps.md` | rollback 手順 / dependency review |
 
 ## リポジトリ
 
@@ -47,6 +108,52 @@
 | `tests/test_live/test_engine.py` | LiveEngine run_one_bar / partial fill / graceful shutdown テスト |
 | `tests/test_main/test_main.py` | live gate 失敗テスト更新（LiveTradingNotImplementedError → return 1） |
 
+## 次セッション引継ぎ（2026-04-17 時点）
+
+### 優先順
+
+#### 1. vector search 有効化（5分）
+
+Claude Code を完全再起動すると SessionStart hook の `smart-install.js` が `~/.local/bin/uv` を自動検出する可能性が高い。
+
+```bash
+# 再起動後に確認
+curl -sf http://localhost:37777/health
+# MCP ツールで /mem-search "Binance" を試す
+```
+
+依然失敗する場合 → `~/.claude-mem/settings.json` に `CLAUDE_MEM_UV_PATH` の設定項目があるか確認し、`C:/Users/temun/.local/bin/uv.exe` を明示指定する。
+
+#### 2. MP-01 / MP-03 完了（10分）
+
+vector search 不可の場合は FTS で代用：
+
+```bash
+# 誤情報（Binance, id=6）を検索・削除
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" \
+  "SELECT id, title FROM observations WHERE narrative LIKE '%Binance%';"
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "DELETE FROM observations WHERE id=6;"
+sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "SELECT id FROM observations WHERE id=6;"
+# → 何も返らなければ PASS
+```
+
+完了後、`docs/claude_mem_security_tests.md` と `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新する。
+
+#### 3. master マージ ← **次のアクション**
+
+Important A / B 修正後:
+```bash
+cd C:/tool/claude/crypt
+python -m pytest -q  # 657+ passed を確認
+git add src/cryptbot/live/engine.py src/cryptbot/execution/live_executor.py tests/...
+git commit -m "fix: TIMEOUT_CANCELLED LiveState update and empty order_id validation"
+git checkout master
+git merge feat/startup-recovery-hardening
+git push origin master
+```
+
+---
+
 ## 次のアクション
 
 1. ~~**P2 実装を開始**~~（完了）
@@ -54,8 +161,21 @@
 3. ~~**OHLCV 自動投入**~~（完了 — OhlcvUpdater 実装・LiveEngine 注入・バックフィル追加）
 4. ~~**P2（F4/F5/F6）実装**~~（完了 — commit d85de98・テスト 601 passed）
 5. ~~**詳細敵対的レビュー対応（NF1〜NF7）**~~（完了 — commit 未 push）
-6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed、未コミット）
-7. 本番起動準備
+6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed）
+7. ~~**起動リカバリー堅牢化（P1/P2/P3）**~~ — 8/8 タスク完了、残2件対応後 master マージ
+8. ~~**【次セッション】残 Important 2件を修正して master にマージ**~~ — Important A/B 修正済み（659 passed、2026-04-18）
+9. **【次セッション】master マージ → 本番起動準備**
+
+### 修正済み Important 2件（2026-04-18）
+
+#### A: `TIMEOUT_CANCELLED` で LiveState が更新されない — ✅ 修正済み
+- `src/cryptbot/live/engine.py` の `_poll_active_orders()` に `TIMEOUT_CANCELLED + executed_amount > 0` ブランチを追加
+- テスト 2 件追加（BUY 部分約定あり / executed_amount=0 で変化なし）
+
+#### B: `exchange_order_id` 空文字列が検証をすり抜ける — ✅ 修正済み
+- `src/cryptbot/execution/live_executor.py` の order_id 検証を強化
+- `""` / `"0"` → SUBMIT_FAILED、非数値文字列（"EX-001" 等）は許容
+- テスト 2 件追加（`""` / `"0"` → SUBMIT_FAILED）
 
 ---
 

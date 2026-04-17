@@ -434,6 +434,7 @@ class TestPollPartialFills:
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
             side="",
+            current_db_status="PARTIAL",
         )
 
     @pytest.mark.asyncio
@@ -460,6 +461,7 @@ class TestPollPartialFills:
             created_at_iso="2024-01-01T09:00:00+09:00",
             partial_fill_timeout_sec=settings.order_timeout_sec,
             side="",
+            current_db_status="SUBMITTED",
         )
 
     @pytest.mark.asyncio
@@ -503,9 +505,10 @@ class TestPollPartialFills:
     async def test_handle_error_does_not_crash(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """handle_partial_fill が例外を送出しても _poll_active_orders はクラッシュしない。"""
+        """handle_partial_fill が ExchangeError を送出しても _poll_active_orders はクラッシュしない。"""
+        from cryptbot.exchanges.base import ExchangeError
         mock_executor.handle_partial_fill = AsyncMock(
-            side_effect=RuntimeError("exchange error")
+            side_effect=ExchangeError("HTTP 503", status_code=503)
         )
         partial_order = {
             "id": 1,
@@ -1264,6 +1267,76 @@ class TestPollActiveOrdersCanceledPartiallyFilled:
         assert state.position_size == pytest.approx(0.06)  # 0.1 - 0.04
 
     @pytest.mark.asyncio
+    async def test_buy_timeout_cancelled_with_partial_fill_updates_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """BUY TIMEOUT_CANCELLED かつ executed_amount > 0 で LiveState.position_size が更新される。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+
+        buy_order = {
+            "id": 30,
+            "status": "PARTIAL",
+            "side": "BUY",
+            "exchange_order_id": "EX_300",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=30,
+            side="BUY",
+            status="TIMEOUT_CANCELLED",
+            executed_amount=0.03,
+            average_price=5_000_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.03)
+        assert state.entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_time is not None
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancelled_with_zero_fill_does_not_update_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """TIMEOUT_CANCELLED かつ executed_amount=0 で LiveState は変化しない。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+        state_before = state_store.load()
+
+        buy_order = {
+            "id": 31,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_301",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=31,
+            side="BUY",
+            status="TIMEOUT_CANCELLED",
+            executed_amount=0.0,
+            average_price=0.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state_after = state_store.load()
+        assert state_after.position_size == state_before.position_size
+        assert state_after.entry_price == state_before.entry_price
+
+    @pytest.mark.asyncio
     async def test_canceled_unfilled_does_not_update_live_state(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
@@ -1426,6 +1499,27 @@ class TestRecoverOnRestart:
                 engine._cancel_orphan_orders()
         mock_update.assert_not_called()
 
+    def test_orphan_cancel_inserts_order_event(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """orphan キャンセル時に order_events に CANCELLED が記録される。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        orphan = {
+            "id": 42,
+            "status": "CREATED",
+            "exchange_order_id": None,
+        }
+        with patch.object(storage, "get_active_orders", return_value=[orphan]):
+            with patch.object(storage, "update_order_status"):
+                with patch.object(storage, "insert_order_event") as mock_event:
+                    engine._cancel_orphan_orders()
+
+        mock_event.assert_called_once_with(
+            42, "CANCELLED", note="startup_orphan_recovery"
+        )
+
     def test_get_active_orders_error_does_not_propagate(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
@@ -1485,7 +1579,7 @@ class TestRecoverOnRestart:
     async def test_run_calls_recover_on_restart(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """run() が _sync_initial_balance の直後に _recover_on_restart を呼ぶ。"""
+        """run() が _recover_on_restart を _sync_initial_balance より前に呼ぶ。"""
         engine = _make_engine(
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
@@ -1500,3 +1594,104 @@ class TestRecoverOnRestart:
                         await engine.run(assets=None)
 
         mock_recover.assert_awaited_once()
+
+
+# ------------------------------------------------------------------ #
+# TestStartupOrder: run() 起動順序テスト
+# ------------------------------------------------------------------ #
+
+class TestStartupOrder:
+    """run() の起動順序テスト: _recover_on_restart → _sync_initial_balance。"""
+
+    @pytest.mark.asyncio
+    async def test_recover_called_before_balance_sync(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """_recover_on_restart が _sync_initial_balance より先に呼ばれる。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        call_order: list[str] = []
+
+        async def fake_sync_balance(assets):
+            call_order.append("sync_balance")
+
+        async def fake_recover():
+            call_order.append("recover")
+
+        engine._sync_initial_balance = fake_sync_balance
+        engine._recover_on_restart = fake_recover
+
+        # bar_loop と partial_fill_loop を即停止させる
+        async def fake_bar_loop():
+            raise asyncio.CancelledError
+
+        async def fake_partial_fill_loop():
+            await asyncio.sleep(1)  # 起動順序テストなので実行されない
+
+        engine._bar_loop = fake_bar_loop
+        engine._partial_fill_loop = fake_partial_fill_loop
+
+        try:
+            await engine.run(assets={"jpy": 100_000.0, "btc": 0.0})
+        except asyncio.CancelledError:
+            pass  # 期待通り
+
+        assert len(call_order) >= 2, f"期待: 2つ以上の呼び出し、実際: {call_order}"
+        assert call_order[0] == "recover", f"期待: recover が最初、実際: {call_order}"
+        assert call_order[1] == "sync_balance", f"期待: sync_balance が2番目、実際: {call_order}"
+
+
+# ------------------------------------------------------------------ #
+# terminal 約定後の DB 更新失敗で fail-close するテスト
+# ------------------------------------------------------------------ #
+
+class TestPollActiveOrdersFailClose:
+    """terminal 約定後の DB 更新失敗で fail-close するテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_db_error_from_handle_partial_fill_propagates(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """handle_partial_fill が RuntimeError を上げたとき、ExchangeError でなければ伝播する。"""
+        from cryptbot.exchanges.base import ExchangeError
+        _seed_state(state_store, balance=1_000_000.0)
+
+        order = {
+            "id": 10,
+            "status": "SUBMITTED",
+            "exchange_order_id": "EX-10",
+            "created_at": datetime.now(tz=JST).isoformat(),
+            "side": "buy",
+        }
+        mock_executor.handle_partial_fill.side_effect = RuntimeError("DB書き込み失敗")
+
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[order]):
+            with pytest.raises(RuntimeError, match="DB書き込み失敗"):
+                await engine._poll_active_orders()
+
+    @pytest.mark.asyncio
+    async def test_exchange_error_is_logged_and_continued(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """handle_partial_fill が ExchangeError を上げたとき、ログして continue する。"""
+        from cryptbot.exchanges.base import ExchangeError
+        _seed_state(state_store, balance=1_000_000.0)
+
+        order = {
+            "id": 11,
+            "status": "SUBMITTED",
+            "exchange_order_id": "EX-11",
+            "created_at": datetime.now(tz=JST).isoformat(),
+            "side": "buy",
+        }
+        mock_executor.handle_partial_fill.side_effect = ExchangeError("HTTP 503", status_code=503)
+
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[order]):
+            await engine._poll_active_orders()  # 例外が上がらないことを確認

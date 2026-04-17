@@ -1,7 +1,7 @@
 """LiveExecutor のテスト。"""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -425,6 +425,126 @@ class TestHandlePartialFill:
 # P4-L07: 後方互換（BaseExecutor のサブクラス確認）
 # ------------------------------------------------------------------ #
 
+class TestPlaceOrderExchangeIdValidation:
+    """exchange_order_id の検証テスト。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """取引所レスポンスに order_id がない場合 SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"some_field": "value"}  # order_id なし
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_zero_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """order_id=0 の場合も SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": 0}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_empty_string_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """order_id が空文字列の場合 SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": ""}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_zero_string_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """order_id が文字列 "0" の場合 SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": "0"}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_valid_order_id_results_in_submitted(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """正常な order_id があれば SUBMITTED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": 12345}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        result = await executor.place_order(
+            "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+        )
+
+        assert result.status == "SUBMITTED"
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status, exchange_order_id FROM orders WHERE id=?",
+                (result.order_id,),
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMITTED"
+        assert row["exchange_order_id"] == "12345"
+
+
+# ------------------------------------------------------------------ #
+# P4-L07: 後方互換（BaseExecutor のサブクラス確認）
+# ------------------------------------------------------------------ #
+
 class TestLiveExecutorInterface:
     def test_is_subclass_of_base_executor(self) -> None:
         from cryptbot.execution.base import BaseExecutor
@@ -618,3 +738,124 @@ class TestHandlePartialFillNF4:
         assert result.status == "CANCELED_PARTIALLY_FILLED"
         assert result.executed_amount == pytest.approx(0.04)
         assert result.average_price == pytest.approx(5_200_000.0)
+
+
+# ------------------------------------------------------------------ #
+# Task 2: PARTIALLY_FILLED 冪等更新テスト
+# ------------------------------------------------------------------ #
+
+class TestHandlePartialFillIdempotent:
+    """DB status=PARTIAL + 取引所 PARTIALLY_FILLED の冪等動作テスト。"""
+
+    @pytest.mark.asyncio
+    async def test_partial_db_partially_filled_exchange_within_timeout(
+        self, tmp_path, mock_exchange
+    ):
+        """DB=PARTIAL, 取引所=PARTIALLY_FILLED, タイムアウト未満 → fill snapshot更新、terminal=False。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+        oid = storage.insert_order({
+            "pair": "btc_jpy", "side": "BUY", "order_type": "limit",
+            "size": 0.001, "price": 5_000_000.0, "strategy": "test",
+            "status": "CREATED",
+        })
+        storage.update_order_status(oid, "SUBMITTED", exchange_order_id="EX-1")
+        storage.update_order_status(oid, "PARTIAL", fill_price=5_000_000.0, fill_size=0.0005)
+
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "PARTIALLY_FILLED",
+            "executed_amount": "0.0007",
+            "average_price": "5050000",
+        })
+        executor = LiveExecutor(storage=storage, exchange=mock_exchange)
+        created_at = (datetime.now(tz=JST) - timedelta(seconds=10)).isoformat()
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=oid,
+            exchange_order_id="EX-1",
+            created_at_iso=created_at,
+            partial_fill_timeout_sec=3600,
+            side="buy",
+            current_db_status="PARTIAL",
+        )
+
+        assert result.terminal is False
+        with storage._connect() as conn:
+            row = conn.execute("SELECT fill_size, status FROM orders WHERE id=?", (oid,)).fetchone()
+        assert row["status"] == "PARTIAL"
+        assert row["fill_size"] == pytest.approx(0.0007)
+
+    @pytest.mark.asyncio
+    async def test_partial_db_partially_filled_exchange_past_timeout(
+        self, tmp_path, mock_exchange
+    ):
+        """DB=PARTIAL, 取引所=PARTIALLY_FILLED, タイムアウト超過 → cancel呼び出し、terminal=True。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+        oid = storage.insert_order({
+            "pair": "btc_jpy", "side": "BUY", "order_type": "limit",
+            "size": 0.001, "price": 5_000_000.0, "strategy": "test",
+            "status": "CREATED",
+        })
+        storage.update_order_status(oid, "SUBMITTED", exchange_order_id="EX-2")
+        storage.update_order_status(oid, "PARTIAL", fill_price=5_000_000.0, fill_size=0.0005)
+
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "PARTIALLY_FILLED",
+            "executed_amount": "0.0005",
+            "average_price": "5000000",
+        })
+        mock_exchange.cancel_order = AsyncMock(return_value={})
+        executor = LiveExecutor(storage=storage, exchange=mock_exchange)
+        created_at = (datetime.now(tz=JST) - timedelta(seconds=7200)).isoformat()
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=oid,
+            exchange_order_id="EX-2",
+            created_at_iso=created_at,
+            partial_fill_timeout_sec=3600,
+            side="buy",
+            current_db_status="PARTIAL",
+        )
+
+        assert result.terminal is True
+        mock_exchange.cancel_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_submitted_db_partially_filled_exchange_within_timeout(
+        self, tmp_path, mock_exchange
+    ):
+        """DB=SUBMITTED, 取引所=PARTIALLY_FILLED → 通常遷移 PARTIAL、terminal=False。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+        oid = storage.insert_order({
+            "pair": "btc_jpy", "side": "BUY", "order_type": "limit",
+            "size": 0.001, "price": 5_000_000.0, "strategy": "test",
+            "status": "CREATED",
+        })
+        storage.update_order_status(oid, "SUBMITTED", exchange_order_id="EX-3")
+
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "PARTIALLY_FILLED",
+            "executed_amount": "0.0005",
+            "average_price": "5000000",
+        })
+        executor = LiveExecutor(storage=storage, exchange=mock_exchange)
+        created_at = (datetime.now(tz=JST) - timedelta(seconds=10)).isoformat()
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=oid,
+            exchange_order_id="EX-3",
+            created_at_iso=created_at,
+            partial_fill_timeout_sec=3600,
+            side="buy",
+            current_db_status="SUBMITTED",
+        )
+
+        assert result.terminal is False
+        with storage._connect() as conn:
+            row = conn.execute("SELECT status FROM orders WHERE id=?", (oid,)).fetchone()
+        assert row["status"] == "PARTIAL"

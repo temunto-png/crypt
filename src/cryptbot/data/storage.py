@@ -836,6 +836,44 @@ class Storage:
                 params,
             )
 
+    def update_order_fill_snapshot(
+        self,
+        order_id: int,
+        fill_price: float,
+        fill_size: float,
+    ) -> None:
+        """PARTIAL 注文の fill_price / fill_size をインプレース更新する。
+
+        PARTIAL→PARTIAL は _VALID_STATUS_TRANSITIONS で許容されないため、
+        同一ステータスのままスナップショットだけを更新するための専用 API。
+
+        Raises:
+            ValueError: 注文が存在しない、または status が PARTIAL でない場合
+        """
+        updated_at = now_jst().isoformat()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE id = :order_id",
+                {"order_id": order_id},
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"order_id={order_id} の注文が存在しません。")
+            if row["status"] != "PARTIAL":
+                raise ValueError(
+                    f"update_order_fill_snapshot は PARTIAL ステータスの注文のみに使用可能です。"
+                    f" 現在のステータス: {row['status']!r}"
+                )
+            conn.execute(
+                "UPDATE orders SET fill_price = :fill_price, fill_size = :fill_size, "
+                "updated_at = :updated_at WHERE id = :order_id",
+                {
+                    "fill_price": fill_price,
+                    "fill_size": fill_size,
+                    "updated_at": updated_at,
+                    "order_id": order_id,
+                },
+            )
+
     def insert_order_event(
         self,
         order_id: int,
