@@ -957,3 +957,49 @@ class TestVerifyOhlcvIntegrityInLoadOhlcv:
 
         with pytest.raises(ValueError, match="ハッシュ検証失敗"):
             storage.load_ohlcv("btc_jpy", "1hour", verify=True, fail_closed=True)
+
+
+# ------------------------------------------------------------------ #
+# P1-01: update_order_fill_snapshot
+# ------------------------------------------------------------------ #
+
+class TestUpdateOrderFillSnapshot:
+    def _base_order(self) -> dict:
+        return {
+            "pair": "btc_jpy",
+            "side": "BUY",
+            "order_type": "limit",
+            "price": 5_000_000.0,
+            "size": 0.001,
+            "status": "CREATED",
+        }
+
+    def test_updates_fill_on_partial_order(self, tmp_path):
+        db_path = str(tmp_path / "test.db")
+        storage = Storage(db_path, data_dir=tmp_path / "data")
+        storage.initialize()
+        oid = storage.insert_order(self._base_order())
+        storage.update_order_status(oid, "SUBMITTED", exchange_order_id="EX-1")
+        storage.update_order_status(oid, "PARTIAL", fill_price=5_000_000.0, fill_size=0.0005)
+
+        storage.update_order_fill_snapshot(oid, fill_price=5_100_000.0, fill_size=0.0008)
+
+        with storage._connect() as conn:
+            row = conn.execute("SELECT fill_price, fill_size, status FROM orders WHERE id=?", (oid,)).fetchone()
+        assert row["status"] == "PARTIAL"
+        assert row["fill_price"] == pytest.approx(5_100_000.0)
+        assert row["fill_size"] == pytest.approx(0.0008)
+
+    def test_raises_if_order_not_found(self, tmp_path):
+        storage = Storage(str(tmp_path / "test.db"), data_dir=tmp_path / "data")
+        storage.initialize()
+        with pytest.raises(ValueError, match="存在しません"):
+            storage.update_order_fill_snapshot(9999, fill_price=1.0, fill_size=0.001)
+
+    def test_raises_if_status_not_partial(self, tmp_path):
+        storage = Storage(str(tmp_path / "test.db"), data_dir=tmp_path / "data")
+        storage.initialize()
+        oid = storage.insert_order(self._base_order())
+        storage.update_order_status(oid, "SUBMITTED", exchange_order_id="EX-2")
+        with pytest.raises(ValueError, match="PARTIAL ステータス"):
+            storage.update_order_fill_snapshot(oid, fill_price=1.0, fill_size=0.001)
