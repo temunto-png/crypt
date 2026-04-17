@@ -505,6 +505,9 @@ class LiveEngine:
         for order in orphans:
             try:
                 self._storage.update_order_status(int(order["id"]), "CANCELLED")
+                self._storage.insert_order_event(
+                    int(order["id"]), "CANCELLED", note="startup_orphan_recovery"
+                )
                 logger.warning(
                     "live engine: orphan 注文をローカルキャンセル (id=%s)", order["id"]
                 )

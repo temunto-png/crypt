@@ -1428,6 +1428,27 @@ class TestRecoverOnRestart:
                 engine._cancel_orphan_orders()
         mock_update.assert_not_called()
 
+    def test_orphan_cancel_inserts_order_event(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """orphan キャンセル時に order_events に CANCELLED が記録される。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        orphan = {
+            "id": 42,
+            "status": "CREATED",
+            "exchange_order_id": None,
+        }
+        with patch.object(storage, "get_active_orders", return_value=[orphan]):
+            with patch.object(storage, "update_order_status"):
+                with patch.object(storage, "insert_order_event") as mock_event:
+                    engine._cancel_orphan_orders()
+
+        mock_event.assert_called_once_with(
+            42, "CANCELLED", note="startup_orphan_recovery"
+        )
+
     def test_get_active_orders_error_does_not_propagate(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
