@@ -63,40 +63,6 @@ class TestRecoveryIntegration:
 
     def test_created_and_submitted_mixed_recovery(self, tmp_path):
         """実DB: CREATED orphan と SUBMITTED が混在する場合、orphan のみキャンセルされる。"""
-        storage = _make_storage(tmp_path)
-        orphan_id = storage.insert_order({
-            "pair": "btc_jpy",
-            "side": "BUY",
-            "order_type": "limit",
-            "size": 0.001,
-            "price": 5_000_000.0,
-            "strategy": "test",
-            "status": "CREATED",
-        })
-        # orphan が CANCELLED になった後でないと UNIQUE 制約違反になるため、
-        # まず orphan をキャンセルしてから submitted を挿入する
-        storage.update_order_status(orphan_id, "CANCELLED")
-
-        submitted_id = storage.insert_order({
-            "pair": "btc_jpy",
-            "side": "BUY",
-            "order_type": "limit",
-            "size": 0.001,
-            "price": 6_000_000.0,
-            "strategy": "test",
-            "status": "CREATED",
-        })
-        storage.update_order_status(submitted_id, "SUBMITTED", exchange_order_id="EX-99")
-
-        # orphan_id を CREATED に戻すことはできないので、
-        # 別の orphan を作るために submitted を一時終端させてから再作成する
-        # → テストを再設計: 2つの注文を別 pair で試みるか、順番を変える
-        # UNIQUE INDEX は (pair) WHERE active なので、CANCELLED は制約外
-        # orphan は CREATED のまま（CANCELLEDにしない）で別の CREATED を作れない
-        # → pair を変えて別 pair でテストする
-
-        # 実際のシナリオに合わせて再設計:
-        # orphan (btc_jpy CREATED, no exchange_id) と submitted (eth_jpy SUBMITTED with exchange_id)
         storage2 = _make_storage(tmp_path / "db2")
         orphan_id2 = storage2.insert_order({
             "pair": "btc_jpy",
@@ -133,10 +99,18 @@ class TestRecoveryIntegration:
         submitted_row = conn.execute(
             "SELECT status FROM orders WHERE id=?", (submitted_id2,)
         ).fetchone()
+        orphan_events = conn.execute(
+            "SELECT event_type, note FROM order_events WHERE order_id=?", (orphan_id2,)
+        ).fetchall()
         conn.close()
 
         assert orphan_row["status"] == "CANCELLED"
         assert submitted_row["status"] == "SUBMITTED"
+        # orphan のイベント記録も確認
+        event_types = [e["event_type"] for e in orphan_events]
+        assert "CANCELLED" in event_types
+        notes = [e["note"] for e in orphan_events]
+        assert any("startup_orphan_recovery" in (n or "") for n in notes)
 
     def test_partial_fill_snapshot_updated_without_status_change(self, tmp_path):
         """実DB: PARTIAL 注文に update_order_fill_snapshot → fill 更新、status 変化なし。"""
