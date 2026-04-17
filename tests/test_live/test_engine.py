@@ -1267,6 +1267,76 @@ class TestPollActiveOrdersCanceledPartiallyFilled:
         assert state.position_size == pytest.approx(0.06)  # 0.1 - 0.04
 
     @pytest.mark.asyncio
+    async def test_buy_timeout_cancelled_with_partial_fill_updates_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """BUY TIMEOUT_CANCELLED かつ executed_amount > 0 で LiveState.position_size が更新される。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+
+        buy_order = {
+            "id": 30,
+            "status": "PARTIAL",
+            "side": "BUY",
+            "exchange_order_id": "EX_300",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=30,
+            side="BUY",
+            status="TIMEOUT_CANCELLED",
+            executed_amount=0.03,
+            average_price=5_000_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.03)
+        assert state.entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_price == pytest.approx(5_000_000.0)
+        assert state.position_entry_time is not None
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancelled_with_zero_fill_does_not_update_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """TIMEOUT_CANCELLED かつ executed_amount=0 で LiveState は変化しない。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+        state_before = state_store.load()
+
+        buy_order = {
+            "id": 31,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_301",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=31,
+            side="BUY",
+            status="TIMEOUT_CANCELLED",
+            executed_amount=0.0,
+            average_price=0.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state_after = state_store.load()
+        assert state_after.position_size == state_before.position_size
+        assert state_after.entry_price == state_before.entry_price
+
+    @pytest.mark.asyncio
     async def test_canceled_unfilled_does_not_update_live_state(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:

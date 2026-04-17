@@ -473,6 +473,50 @@ class TestPlaceOrderExchangeIdValidation:
         assert row["status"] == "SUBMIT_FAILED"
 
     @pytest.mark.asyncio
+    async def test_empty_string_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """order_id が空文字列の場合 SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": ""}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
+    async def test_zero_string_order_id_results_in_submit_failed(
+        self, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """order_id が文字列 "0" の場合 SUBMIT_FAILED に遷移する。"""
+        mock_exchange.place_order = AsyncMock(
+            return_value={"order_id": "0"}
+        )
+        executor = LiveExecutor(exchange=mock_exchange, storage=storage)
+
+        with pytest.raises(ValueError):
+            await executor.place_order(
+                "btc_jpy", "buy", "limit", 0.001, price=5_000_000.0
+            )
+
+        with storage._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM orders WHERE pair='btc_jpy'"
+            ).fetchone()
+        assert row is not None
+        assert row["status"] == "SUBMIT_FAILED"
+
+    @pytest.mark.asyncio
     async def test_valid_order_id_results_in_submitted(
         self, storage: Storage, mock_exchange: MagicMock
     ) -> None:

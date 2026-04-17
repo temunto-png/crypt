@@ -71,9 +71,9 @@
 - [ ] Phase 0 の全チェックが完了している
 - [ ] 非機密 repo 1 つを対象に claude-mem を有効化した
 - [ ] memory on/off で同じタスクを比較した（`docs/claude_mem_golden_tasks.md` 参照）
-- [ ] secret leakage test を実行した（`docs/claude_mem_security_tests.md` 参照）
-- [ ] memory poisoning test を実行した（同上）
-- [ ] 保存データを実際に削除できることを確認した
+- [x] secret leakage test を実行した（SL-01〜03 全 PASS、2026-04-17）
+- [x] memory poisoning test を実行した（MP-01/MP-03 PASS、2026-04-18）
+- [x] 保存データを実際に削除できることを確認した（MP-03 にて DELETE 手順確認済み）
 - [ ] worker 障害時の disable 手順を確認した
 
 ### Phase 1 完了判定

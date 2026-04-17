@@ -118,11 +118,29 @@ class LiveExecutor(BaseExecutor):
             result = await self._exchange.place_order(pair, side, order_type, size, price)
             raw_order_id = result.get("order_id")
 
-            # order_id が存在し、かつ数値の場合は値が > 0 であることを確認
-            if raw_order_id is None or (isinstance(raw_order_id, (int, float)) and raw_order_id <= 0):
+            # order_id の検証: None・空文字・0 以下を拒否
+            # isinstance(str) チェックでは空文字列 "" や "0" を検出できないため
+            # 文字列変換後の値も確認する。
+            _oid_str = str(raw_order_id).strip() if raw_order_id is not None else ""
+            if not _oid_str:
                 raise ValueError(
                     f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
                 )
+            if isinstance(raw_order_id, (int, float)) and raw_order_id <= 0:
+                raise ValueError(
+                    f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                )
+            if isinstance(raw_order_id, str):
+                # 数値文字列の場合のみ値チェック（"EX-001" 等の非数値文字列は許容）
+                try:
+                    if int(_oid_str) <= 0:
+                        raise ValueError(
+                            f"取引所レスポンスに有効な order_id がありません: {raw_order_id!r}"
+                        )
+                except (OverflowError, ValueError) as exc:
+                    if "order_id" in str(exc):
+                        raise  # 上の if 節で raise した ValueError を再送出
+                    # int() 変換失敗（非数値文字列）= 有効な ID として許容
 
             exchange_order_id: str = str(raw_order_id)
 

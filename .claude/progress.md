@@ -2,10 +2,10 @@
 
 ## 現在のフェーズ
 
-**claude-mem 導入 Phase 1 進行中（セキュリティテスト実施中）**
+**Important A/B 修正完了・master マージ待ち**
 
-- テスト数: **655 passed**（crypt 本体は変更なし）
-- ブランチ: `feat/startup-recovery-hardening`（base = `53a3a51`）— crypt 本体の Important 2件はまだ未修正
+- テスト数: **659 passed**
+- ブランチ: `feat/startup-recovery-hardening`（base = `53a3a51`）— Important A/B 修正済み
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
 
 ## claude-mem 導入状況（2026-04-17）
@@ -31,8 +31,8 @@
 | SL-01: DB secret スキャン | **PASS** | sk-/ghp_/api_key/password パターン検出なし |
 | SL-02: tool output secret 保存確認 | **PASS** | ダミー secret（sk-test-AAA/mysecret）は narrative/text/facts に保存されず。LLM要約のみ保存 |
 | SL-03: 個別 observation 削除 | **PASS** | `DELETE FROM observations WHERE id=X` で削除・確認できた |
-| MP-01: 誤情報注入テスト | **未完了** | Binance 誤情報を手動挿入済み。次セッションで search で検出・訂正できるか確認要 |
-| MP-03: 有害 memory 削除 | **未完了** | uv 未インストールによりセマンティック検索不可。FTS 検索は動作中 |
+| MP-01: 誤情報注入テスト | **PASS** | FTS 検索で id=6 の Binance 誤情報を正しく検出（2026-04-18） |
+| MP-03: 有害 memory 削除 | **PASS** | id=6 を DELETE 後、SELECT 空返却確認（2026-04-18） |
 
 ### 重要メモ: uv インストール済み・vector search 未解決
 
@@ -50,11 +50,11 @@
 ### Phase 1 残タスク
 
 - [x] uv インストール（v0.11.7、`~/.local/bin`）
-- [ ] Claude Code 完全再起動 → vector search 有効化確認
-- [ ] MP-01: 誤情報注入後の回答品質確認
-- [ ] MP-03: 有害 memory 特定・削除確認（vector search 有効化後）
-- [ ] `docs/claude_mem_security_tests.md` に結果を記入
-- [ ] `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新
+- [ ] Claude Code 完全再起動 → vector search 有効化確認（任意、FTS で代替確認済み）
+- [x] MP-01: 誤情報注入後の回答品質確認（FTS で PASS、2026-04-18）
+- [x] MP-03: 有害 memory 特定・削除確認（PASS、2026-04-18）
+- [x] `docs/claude_mem_security_tests.md` に結果を記入（2026-04-18）
+- [x] `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新（2026-04-18）
 
 ### 作成済みドキュメント
 
@@ -139,28 +139,7 @@ sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "SELECT id FROM observations 
 
 完了後、`docs/claude_mem_security_tests.md` と `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新する。
 
-#### 3. crypt Important A の修正
-
-- **ファイル**: `src/cryptbot/live/engine.py` — `_poll_active_orders()` の result 処理ブロック
-- **問題**: `TIMEOUT_CANCELLED` かつ `executed_amount > 0` のとき LiveState が更新されない。BUY が部分約定後にタイムアウトキャンセルされると `position_size = 0` のまま BTC が取引所に残る
-- **修正箇所**: `CANCELED_PARTIALLY_FILLED` の elif チェーンの直後に追加
-  ```python
-  elif result.status == "TIMEOUT_CANCELLED" and result.executed_amount > 0:
-      # CANCELED_PARTIALLY_FILLED と同じ LiveState 更新ロジック
-  ```
-- **追加テスト**: `test_timeout_cancelled_buy_with_partial_fill_updates_live_state`
-
-#### 4. crypt Important B の修正
-
-- **ファイル**: `src/cryptbot/execution/live_executor.py:119-127` — `place_order()` validation
-- **問題**: `isinstance(raw_order_id, (int, float))` が `""` / `"0"` を通過させる
-- **修正**:
-  ```python
-  if not raw_order_id or not str(raw_order_id).strip() or int(str(raw_order_id)) <= 0:
-  ```
-- **追加テスト**: `test_empty_string_order_id_results_in_submit_failed`
-
-#### 5. master マージ
+#### 3. master マージ ← **次のアクション**
 
 Important A / B 修正後:
 ```bash
@@ -184,21 +163,19 @@ git push origin master
 5. ~~**詳細敵対的レビュー対応（NF1〜NF7）**~~（完了 — commit 未 push）
 6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed）
 7. ~~**起動リカバリー堅牢化（P1/P2/P3）**~~ — 8/8 タスク完了、残2件対応後 master マージ
-8. **【次セッション】残 Important 2件を修正して master にマージ** → 本番起動準備
+8. ~~**【次セッション】残 Important 2件を修正して master にマージ**~~ — Important A/B 修正済み（659 passed、2026-04-18）
+9. **【次セッション】master マージ → 本番起動準備**
 
-### 次セッションで対応する Important 2件
+### 修正済み Important 2件（2026-04-18）
 
-#### A: `TIMEOUT_CANCELLED` で LiveState が更新されない
-- **場所**: `src/cryptbot/live/engine.py` — `_poll_active_orders()` の result 処理ブロック（`FULLY_FILLED` / `CANCELED_PARTIALLY_FILLED` の elif チェーン）
-- **問題**: `handle_partial_fill()` が `status="TIMEOUT_CANCELLED"` を返しても engine 側に処理分岐がない。BUY が部分約定済みでタイムアウトキャンセルされた場合 `LiveState.position_size = 0` のままで BTC が取引所に残る
-- **修正**: `CANCELED_PARTIALLY_FILLED` ブランチと同じ LiveState 更新ロジックを `elif result.status == "TIMEOUT_CANCELLED" and result.executed_amount > 0:` で追加
-- **テスト**: `test_timeout_cancelled_buy_with_partial_fill_updates_live_state`
+#### A: `TIMEOUT_CANCELLED` で LiveState が更新されない — ✅ 修正済み
+- `src/cryptbot/live/engine.py` の `_poll_active_orders()` に `TIMEOUT_CANCELLED + executed_amount > 0` ブランチを追加
+- テスト 2 件追加（BUY 部分約定あり / executed_amount=0 で変化なし）
 
-#### B: `exchange_order_id` 空文字列が検証をすり抜ける
-- **場所**: `src/cryptbot/execution/live_executor.py:119-127` — `place_order()` validation
-- **問題**: `isinstance(raw_order_id, (int, float))` チェックが文字列 `""` / `"0"` を通過させる
-- **修正**: `if not raw_order_id or not str(raw_order_id).strip() or int(str(raw_order_id)) <= 0:`
-- **テスト**: `test_empty_string_order_id_results_in_submit_failed`
+#### B: `exchange_order_id` 空文字列が検証をすり抜ける — ✅ 修正済み
+- `src/cryptbot/execution/live_executor.py` の order_id 検証を強化
+- `""` / `"0"` → SUBMIT_FAILED、非数値文字列（"EX-001" 等）は許容
+- テスト 2 件追加（`""` / `"0"` → SUBMIT_FAILED）
 
 ---
 

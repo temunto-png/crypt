@@ -484,6 +484,47 @@ class LiveEngine:
                         f"約定同期: LiveState の更新に失敗しました (order_id={result.db_order_id})"
                     )
 
+            elif (
+                result.terminal
+                and result.status == "TIMEOUT_CANCELLED"
+                and result.executed_amount > 0
+            ):
+                # タイムアウトキャンセル時に部分約定分を LiveState に反映する。
+                # BUY が部分約定後にタイムアウトキャンセルされた場合、
+                # 処理しないと position_size=0 のまま BTC が取引所に残る。
+                try:
+                    state = self._state_store.load()
+                    if state is None:
+                        raise LiveGateError(
+                            f"約定同期: LiveState が存在しません (order_id={result.db_order_id})"
+                        )
+                    side = result.side.upper()
+                    if side == "BUY":
+                        state.position_size = result.executed_amount
+                        state.entry_price = result.average_price
+                        state.position_entry_price = result.average_price
+                        state.position_entry_time = now_jst().isoformat()
+                    elif side == "SELL":
+                        state.position_size = max(
+                            0.0, state.position_size - result.executed_amount
+                        )
+                        if state.position_size == 0.0:
+                            state.entry_price = 0.0
+                            state.position_entry_price = 0.0
+                            state.position_entry_time = None
+                    state.updated_at = now_jst().isoformat()
+                    self._state_store.save(state)
+                    logger.warning(
+                        "live engine: タイムアウトキャンセル部分約定 LiveState 更新 order_id=%s side=%s amount=%.4f price=%.0f",
+                        result.db_order_id, side, result.executed_amount, result.average_price,
+                    )
+                except LiveGateError:
+                    raise
+                except Exception:
+                    raise LiveGateError(
+                        f"約定同期: LiveState の更新に失敗しました (order_id={result.db_order_id})"
+                    )
+
     # ------------------------------------------------------------------
     # 内部ヘルパー
     # ------------------------------------------------------------------
