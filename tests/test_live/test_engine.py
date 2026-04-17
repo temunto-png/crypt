@@ -1487,7 +1487,7 @@ class TestRecoverOnRestart:
     async def test_run_calls_recover_on_restart(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """run() が _sync_initial_balance の直後に _recover_on_restart を呼ぶ。"""
+        """run() が _recover_on_restart を _sync_initial_balance より前に呼ぶ。"""
         engine = _make_engine(
             AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
         )
