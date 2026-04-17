@@ -125,8 +125,8 @@ class LiveEngine:
         KeyboardInterrupt / asyncio.CancelledError で graceful shutdown。
         bar_loop または partial_fill_loop が例外を送出した場合は両タスクを停止して伝播。
         """
-        await self._sync_initial_balance(assets)
         await self._recover_on_restart()
+        await self._sync_initial_balance(assets)
 
         bar_task = asyncio.create_task(self._bar_loop(), name="bar_loop")
         partial_task = asyncio.create_task(

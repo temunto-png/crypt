@@ -1502,3 +1502,49 @@ class TestRecoverOnRestart:
                         await engine.run(assets=None)
 
         mock_recover.assert_awaited_once()
+
+
+# ------------------------------------------------------------------ #
+# TestStartupOrder: run() 起動順序テスト
+# ------------------------------------------------------------------ #
+
+class TestStartupOrder:
+    """run() の起動順序テスト: _recover_on_restart → _sync_initial_balance。"""
+
+    @pytest.mark.asyncio
+    async def test_recover_called_before_balance_sync(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """_recover_on_restart が _sync_initial_balance より先に呼ばれる。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        call_order: list[str] = []
+
+        async def fake_sync_balance(assets):
+            call_order.append("sync_balance")
+
+        async def fake_recover():
+            call_order.append("recover")
+
+        engine._sync_initial_balance = fake_sync_balance
+        engine._recover_on_restart = fake_recover
+
+        # bar_loop と partial_fill_loop を即停止させる
+        async def fake_bar_loop():
+            raise asyncio.CancelledError
+
+        async def fake_partial_fill_loop():
+            await asyncio.sleep(1)  # 起動順序テストなので実行されない
+
+        engine._bar_loop = fake_bar_loop
+        engine._partial_fill_loop = fake_partial_fill_loop
+
+        try:
+            await engine.run(assets={"jpy": 100_000.0, "btc": 0.0})
+        except asyncio.CancelledError:
+            pass  # 期待通り
+
+        assert len(call_order) >= 2, f"期待: 2つ以上の呼び出し、実際: {call_order}"
+        assert call_order[0] == "recover", f"期待: recover が最初、実際: {call_order}"
+        assert call_order[1] == "sync_balance", f"期待: sync_balance が2番目、実際: {call_order}"
