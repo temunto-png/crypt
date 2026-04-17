@@ -2,16 +2,16 @@
 
 ## 現在のフェーズ
 
-**詳細敵対的レビュー 新規 P1 対応中（NF1/NF2 完了、NF3 未着手）**
+**ポジション同期（リカバリー）実装完了**
 
-- テスト数: **631 passed**
-- ブランチ: `master`（HEAD = `654be13`、origin 未 push）
-- 状態: NF1〜NF7 全完了
+- テスト数: **638 passed**
+- ブランチ: `master`（HEAD = `566c065`、未コミット変更あり）
+- 状態: 起動リカバリー実装完了（未コミット）
 - メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
 
 ## リポジトリ
 
-- GitHub: https://github.com/temunto-png/crypt.git（branch: master、HEAD = `303f425`）
+- GitHub: https://github.com/temunto-png/crypt.git（branch: master、HEAD = `566c065`）
 - ローカル: `C:\tool\claude\crypt`
 - 未追跡（意図的）: `.claude/`、`claude_code_adversarial_review_handoff.md`、`codex_review_handoff.md`、`docs/superpowers/`
 - Codex 引き継ぎ書: `C:\tool\claude\crypt\codex_review_handoff.md`
@@ -54,7 +54,7 @@
 3. ~~**OHLCV 自動投入**~~（完了 — OhlcvUpdater 実装・LiveEngine 注入・バックフィル追加）
 4. ~~**P2（F4/F5/F6）実装**~~（完了 — commit d85de98・テスト 601 passed）
 5. ~~**詳細敵対的レビュー対応（NF1〜NF7）**~~（完了 — commit 未 push）
-6. ポジション同期（リカバリー）実装（中優先度）
+6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed、未コミット）
 7. 本番起動準備
 
 ---

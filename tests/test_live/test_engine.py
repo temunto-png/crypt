@@ -1381,3 +1381,122 @@ class TestBarLoopUpdateLatest:
                 await engine._bar_loop()
 
         engine.run_one_bar.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
+# _cancel_orphan_orders / _recover_on_restart
+# ------------------------------------------------------------------ #
+
+class TestRecoverOnRestart:
+    """起動リカバリー: _cancel_orphan_orders と _recover_on_restart のテスト。"""
+
+    # --- _cancel_orphan_orders ---
+
+    def test_created_order_without_exchange_id_is_cancelled(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """exchange_order_id=None の CREATED 注文をローカル CANCELLED に遷移する。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        orphan = {
+            "id": 99,
+            "status": "CREATED",
+            "exchange_order_id": None,
+        }
+        with patch.object(storage, "get_active_orders", return_value=[orphan]):
+            with patch.object(storage, "update_order_status") as mock_update:
+                engine._cancel_orphan_orders()
+        mock_update.assert_called_once_with(99, "CANCELLED")
+
+    def test_created_order_with_exchange_id_is_not_cancelled(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """exchange_order_id がある CREATED 注文はキャンセル対象外。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        order = {
+            "id": 55,
+            "status": "CREATED",
+            "exchange_order_id": "EX-999",
+        }
+        with patch.object(storage, "get_active_orders", return_value=[order]):
+            with patch.object(storage, "update_order_status") as mock_update:
+                engine._cancel_orphan_orders()
+        mock_update.assert_not_called()
+
+    def test_get_active_orders_error_does_not_propagate(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """get_active_orders が例外を上げても _cancel_orphan_orders は伝播させない。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", side_effect=RuntimeError("db error")):
+            engine._cancel_orphan_orders()  # 例外が上がらないことを確認
+
+    # --- _recover_on_restart ---
+
+    @pytest.mark.asyncio
+    async def test_recover_calls_cancel_then_poll(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """_recover_on_restart が _cancel_orphan_orders → _poll_active_orders の順で呼ぶ。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        call_order: list[str] = []
+        engine._cancel_orphan_orders = MagicMock(side_effect=lambda: call_order.append("cancel"))
+        engine._poll_active_orders = AsyncMock(side_effect=lambda: call_order.append("poll"))
+
+        await engine._recover_on_restart()
+
+        assert call_order == ["cancel", "poll"]
+
+    @pytest.mark.asyncio
+    async def test_no_orders_completes_without_error(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """アクティブ注文がない場合も正常完了する。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[]):
+            await engine._recover_on_restart()
+        mock_executor.handle_partial_fill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_orphan_get_error_does_not_skip_poll(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """_cancel_orphan_orders 内の get_active_orders 失敗でも _poll_active_orders は呼ばれる。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        engine._poll_active_orders = AsyncMock()
+        with patch.object(storage, "get_active_orders", side_effect=RuntimeError("db")):
+            await engine._recover_on_restart()
+        engine._poll_active_orders.assert_awaited_once()
+
+    # --- run() 統合 ---
+
+    @pytest.mark.asyncio
+    async def test_run_calls_recover_on_restart(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """run() が _sync_initial_balance の直後に _recover_on_restart を呼ぶ。"""
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+
+        async def _stop(*args, **kwargs) -> None:
+            raise asyncio.CancelledError
+
+        with patch.object(engine, "_sync_initial_balance", new_callable=AsyncMock):
+            with patch.object(engine, "_recover_on_restart", new_callable=AsyncMock) as mock_recover:
+                with patch.object(engine, "_bar_loop", side_effect=_stop):
+                    with patch.object(engine, "_partial_fill_loop", new_callable=AsyncMock):
+                        await engine.run(assets=None)
+
+        mock_recover.assert_awaited_once()

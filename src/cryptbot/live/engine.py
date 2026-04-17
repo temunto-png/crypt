@@ -126,6 +126,7 @@ class LiveEngine:
         bar_loop または partial_fill_loop が例外を送出した場合は両タスクを停止して伝播。
         """
         await self._sync_initial_balance(assets)
+        await self._recover_on_restart()
 
         bar_task = asyncio.create_task(self._bar_loop(), name="bar_loop")
         partial_task = asyncio.create_task(
@@ -476,6 +477,40 @@ class LiveEngine:
     # ------------------------------------------------------------------
     # 内部ヘルパー
     # ------------------------------------------------------------------
+
+    async def _recover_on_restart(self) -> None:
+        """再起動時に未解決注文をリカバリーする。run() から一度だけ呼ぶ。"""
+        logger.info("live engine: 起動リカバリー開始")
+        self._cancel_orphan_orders()
+        await self._poll_active_orders()
+        logger.info("live engine: 起動リカバリー完了")
+
+    def _cancel_orphan_orders(self) -> None:
+        """exchange_order_id=NULL の CREATED 注文をローカル CANCELLED に遷移する。
+
+        取引所への送信前にクラッシュした注文が DB に残るケースを処理する。
+        取引所には届いていないため、ローカルで安全にキャンセル扱いにする。
+        """
+        try:
+            active = self._storage.get_active_orders(self._settings.pair)
+        except Exception:
+            logger.exception("live engine: orphan 注文取得に失敗（スキップ）")
+            return
+
+        orphans = [
+            o for o in active
+            if o["status"] == "CREATED" and not o.get("exchange_order_id")
+        ]
+        for order in orphans:
+            try:
+                self._storage.update_order_status(int(order["id"]), "CANCELLED")
+                logger.warning(
+                    "live engine: orphan 注文をローカルキャンセル (id=%s)", order["id"]
+                )
+            except Exception:
+                logger.exception(
+                    "live engine: orphan 注文キャンセル失敗 (id=%s)、スキップ", order["id"]
+                )
 
     async def _submit_pending(
         self,
