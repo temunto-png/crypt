@@ -505,9 +505,10 @@ class TestPollPartialFills:
     async def test_handle_error_does_not_crash(
         self, risk_manager, state_store, storage, mock_executor, settings
     ) -> None:
-        """handle_partial_fill が例外を送出しても _poll_active_orders はクラッシュしない。"""
+        """handle_partial_fill が ExchangeError を送出しても _poll_active_orders はクラッシュしない。"""
+        from cryptbot.exchanges.base import ExchangeError
         mock_executor.handle_partial_fill = AsyncMock(
-            side_effect=RuntimeError("exchange error")
+            side_effect=ExchangeError("HTTP 503", status_code=503)
         )
         partial_order = {
             "id": 1,
@@ -1569,3 +1570,58 @@ class TestStartupOrder:
         assert len(call_order) >= 2, f"期待: 2つ以上の呼び出し、実際: {call_order}"
         assert call_order[0] == "recover", f"期待: recover が最初、実際: {call_order}"
         assert call_order[1] == "sync_balance", f"期待: sync_balance が2番目、実際: {call_order}"
+
+
+# ------------------------------------------------------------------ #
+# terminal 約定後の DB 更新失敗で fail-close するテスト
+# ------------------------------------------------------------------ #
+
+class TestPollActiveOrdersFailClose:
+    """terminal 約定後の DB 更新失敗で fail-close するテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_db_error_from_handle_partial_fill_propagates(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """handle_partial_fill が RuntimeError を上げたとき、ExchangeError でなければ伝播する。"""
+        from cryptbot.exchanges.base import ExchangeError
+        _seed_state(state_store, balance=1_000_000.0)
+
+        order = {
+            "id": 10,
+            "status": "SUBMITTED",
+            "exchange_order_id": "EX-10",
+            "created_at": datetime.now(tz=JST).isoformat(),
+            "side": "buy",
+        }
+        mock_executor.handle_partial_fill.side_effect = RuntimeError("DB書き込み失敗")
+
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[order]):
+            with pytest.raises(RuntimeError, match="DB書き込み失敗"):
+                await engine._poll_active_orders()
+
+    @pytest.mark.asyncio
+    async def test_exchange_error_is_logged_and_continued(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """handle_partial_fill が ExchangeError を上げたとき、ログして continue する。"""
+        from cryptbot.exchanges.base import ExchangeError
+        _seed_state(state_store, balance=1_000_000.0)
+
+        order = {
+            "id": 11,
+            "status": "SUBMITTED",
+            "exchange_order_id": "EX-11",
+            "created_at": datetime.now(tz=JST).isoformat(),
+            "side": "buy",
+        }
+        mock_executor.handle_partial_fill.side_effect = ExchangeError("HTTP 503", status_code=503)
+
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[order]):
+            await engine._poll_active_orders()  # 例外が上がらないことを確認

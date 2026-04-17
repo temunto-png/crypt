@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from cryptbot.models.degradation_detector import DegradationDetector
 from cryptbot.config.settings import LiveSettings
 from cryptbot.data.storage import Storage
+from cryptbot.exchanges.base import ExchangeError
 from cryptbot.execution.live_executor import DuplicateOrderError, LiveExecutor
 from cryptbot.live.gate import LiveGateError
 from cryptbot.live.state import LiveState, LiveStateStore
@@ -400,11 +401,19 @@ class LiveEngine:
                     side=str(order.get("side", "")),
                     current_db_status=str(order.get("status", "SUBMITTED")),
                 )
-            except Exception:
+            except ExchangeError:
+                # 取引所通信の一時失敗 → ログして次の注文へ
                 logger.exception(
-                    "live engine: 注文 (id=%s) のハンドルに失敗", order["id"]
+                    "live engine: 注文 (id=%s) の取引所照合に失敗（次回ポーリングで再試行）",
+                    order["id"],
                 )
                 continue
+            except Exception:
+                # DB・状態永続化の失敗 → 内部状態が市場実態と乖離する可能性があるため伝播
+                logger.exception(
+                    "live engine: 注文 (id=%s) のDB更新に失敗（fail-close）", order["id"]
+                )
+                raise
 
             if result.terminal and result.status == "FULLY_FILLED":
                 try:
