@@ -517,3 +517,104 @@ class TestHandlePartialFillResult:
 
         assert result.terminal is True
         assert result.status == "TIMEOUT_CANCELLED"
+
+
+# ------------------------------------------------------------------ #
+# NF4: PARTIALLY_FILLED / CANCELED_* ステータス処理
+# ------------------------------------------------------------------ #
+
+class TestHandlePartialFillNF4:
+    """NF4: PARTIALLY_FILLED / CANCELED_UNFILLED / CANCELED_PARTIALLY_FILLED の DB 反映。"""
+
+    @pytest.mark.asyncio
+    async def test_partially_filled_updates_db_to_partial(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """PARTIALLY_FILLED → DB を PARTIAL に遷移し fill_price/fill_size を記録する。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.1)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "PARTIALLY_FILLED",
+            "executed_amount": "0.03",
+            "average_price": "5000000",
+        })
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=now_jst().isoformat(),
+            partial_fill_timeout_sec=7200,
+            side="BUY",
+        )
+
+        order = _get_order(storage, result_order.order_id)
+        assert order["status"] == "PARTIAL"
+        assert order["fill_price"] == pytest.approx(5_000_000.0)
+        assert order["fill_size"] == pytest.approx(0.03)
+
+        assert result.terminal is False
+        assert result.status == "WAITING"
+        assert result.executed_amount == pytest.approx(0.03)
+        assert result.average_price == pytest.approx(5_000_000.0)
+
+        events = _get_events(storage, result_order.order_id)
+        assert any(e["event_type"] == "PARTIAL_FILL" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_canceled_unfilled_updates_db_to_cancelled(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """CANCELED_UNFILLED → DB を CANCELLED に遷移し terminal=True を返す。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.1)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "CANCELED_UNFILLED",
+            "executed_amount": "0",
+            "average_price": "0",
+        })
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=now_jst().isoformat(),
+            partial_fill_timeout_sec=7200,
+            side="BUY",
+        )
+
+        order = _get_order(storage, result_order.order_id)
+        assert order["status"] == "CANCELLED"
+
+        assert result.terminal is True
+        assert result.status == "CANCELED_UNFILLED"
+        assert result.executed_amount == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_canceled_partially_filled_updates_db_with_fill(
+        self, executor: LiveExecutor, storage: Storage, mock_exchange: MagicMock
+    ) -> None:
+        """CANCELED_PARTIALLY_FILLED → DB を CANCELLED に遷移し部分約定量を記録する。"""
+        result_order = await executor.place_order("btc_jpy", "buy", "market", 0.1)
+        mock_exchange.get_order = AsyncMock(return_value={
+            "status": "CANCELED_PARTIALLY_FILLED",
+            "executed_amount": "0.04",
+            "average_price": "5200000",
+        })
+
+        result = await executor.handle_partial_fill(
+            pair="btc_jpy",
+            db_order_id=result_order.order_id,
+            exchange_order_id="EX-001",
+            created_at_iso=now_jst().isoformat(),
+            partial_fill_timeout_sec=7200,
+            side="BUY",
+        )
+
+        order = _get_order(storage, result_order.order_id)
+        assert order["status"] == "CANCELLED"
+        assert order["fill_price"] == pytest.approx(5_200_000.0)
+        assert order["fill_size"] == pytest.approx(0.04)
+
+        assert result.terminal is True
+        assert result.status == "CANCELED_PARTIALLY_FILLED"
+        assert result.executed_amount == pytest.approx(0.04)
+        assert result.average_price == pytest.approx(5_200_000.0)

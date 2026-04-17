@@ -237,6 +237,48 @@ class LiveExecutor(BaseExecutor):
                 terminal=True,
             )
 
+        if exchange_status == "PARTIALLY_FILLED":
+            fill_amount = float(order_data.get("executed_amount", 0))
+            avg_price = float(order_data.get("average_price", 0))
+            self._storage.update_order_status(
+                db_order_id,
+                "PARTIAL",
+                fill_price=avg_price,
+                fill_size=fill_amount,
+            )
+            self._storage.insert_order_event(
+                db_order_id,
+                "PARTIAL_FILL",
+                fill_price=avg_price,
+                fill_size=fill_amount,
+            )
+            return OrderSyncResult(
+                db_order_id=db_order_id,
+                side=side,
+                status="WAITING",
+                executed_amount=fill_amount,
+                average_price=avg_price,
+                terminal=False,
+            )
+
+        if exchange_status in ("CANCELED_UNFILLED", "CANCELED_PARTIALLY_FILLED"):
+            fill_amount = float(order_data.get("executed_amount", 0))
+            avg_price = float(order_data.get("average_price", 0))
+            cancel_kwargs: dict = {}
+            if fill_amount > 0:
+                cancel_kwargs["fill_price"] = avg_price
+                cancel_kwargs["fill_size"] = fill_amount
+            self._storage.update_order_status(db_order_id, "CANCELLED", **cancel_kwargs)
+            self._storage.insert_order_event(db_order_id, "CANCELLED", **cancel_kwargs)
+            return OrderSyncResult(
+                db_order_id=db_order_id,
+                side=side,
+                status=exchange_status,
+                executed_amount=fill_amount,
+                average_price=avg_price,
+                terminal=True,
+            )
+
         # タイムアウトチェック: 超過していれば残量キャンセル
         created_at = datetime.fromisoformat(created_at_iso)
         elapsed = (datetime.now(tz=JST) - created_at).total_seconds()

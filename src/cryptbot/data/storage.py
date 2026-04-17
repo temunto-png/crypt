@@ -515,6 +515,7 @@ class Storage:
         start: datetime | None = None,
         end: datetime | None = None,
         verify: bool = False,
+        fail_closed: bool = False,
     ) -> pd.DataFrame:
         """条件に合う Parquet を読み込み結合して返す。
 
@@ -524,12 +525,13 @@ class Storage:
           start: フィルタ開始日時（timezone-aware）
           end: フィルタ終了日時（timezone-aware）
           verify: True の場合、ファイル単位で整合性検証を行い、失敗したファイルをスキップする。
+          fail_closed: True の場合、ハッシュ検証失敗時に ValueError を raise する（デフォルト: False でスキップ）。
 
         Returns:
           OHLCV DataFrame（timestamp 昇順）。データなしの場合は空 DataFrame。
 
         Raises:
-          ValueError: start/end が timezone-naive の場合
+          ValueError: start/end が timezone-naive の場合、または fail_closed=True かつハッシュ検証失敗の場合
         """
         import logging as _logging
         _logger = _logging.getLogger(__name__)
@@ -557,6 +559,21 @@ class Storage:
                 except ValueError as exc:
                     _logger.warning("load_ohlcv: 整合性検証失敗 (%s) → スキップ: %s", fp.name, exc)
                     continue
+
+                # ハッシュ検証
+                try:
+                    year = int(fp.stem)
+                except ValueError:
+                    _logger.warning("load_ohlcv: ファイル名が year として解釈できない → スキップ: %s", fp.name)
+                    continue
+
+                if not self.verify_ohlcv_integrity(pair, timeframe, year):
+                    msg = f"load_ohlcv: ハッシュ検証失敗 ({fp.name})"
+                    if fail_closed:
+                        raise ValueError(msg)
+                    _logger.warning("%s → スキップ", msg)
+                    continue
+
             frames.append(file_df)
 
         if not frames:

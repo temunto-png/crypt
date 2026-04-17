@@ -45,6 +45,7 @@ from cryptbot.utils.time_utils import JST, now_jst
 logger = logging.getLogger(__name__)
 
 _MAX_RECENT_RETURNS = 50
+_MAX_CONSECUTIVE_UPDATE_FAILURES = 3
 
 # タイムフレーム文字列 → 秒数マッピング
 _TIMEFRAME_SECONDS: dict[str, int] = {
@@ -347,10 +348,23 @@ class LiveEngine:
 
     async def _bar_loop(self) -> None:
         """バー確定を待って run_one_bar() を呼ぶ無限ループ。"""
+        consecutive_update_failures = 0
         while True:
             await self._wait_for_next_bar()
             if self._ohlcv_updater is not None:
-                await self._ohlcv_updater.update_latest()
+                ok = await self._ohlcv_updater.update_latest()
+                if not ok:
+                    consecutive_update_failures += 1
+                    logger.warning(
+                        "live engine: OHLCV 更新失敗 (%d 回目)",
+                        consecutive_update_failures,
+                    )
+                    if consecutive_update_failures >= _MAX_CONSECUTIVE_UPDATE_FAILURES:
+                        raise LiveGateError(
+                            f"OHLCV 連続更新失敗: {consecutive_update_failures} 回"
+                        )
+                    continue
+                consecutive_update_failures = 0
             data = self._load_ohlcv()
             if data is not None:
                 await self.run_one_bar(data)
@@ -421,6 +435,44 @@ class LiveEngine:
                         f"約定同期: LiveState の更新に失敗しました (order_id={result.db_order_id})"
                     )
 
+            elif (
+                result.terminal
+                and result.status == "CANCELED_PARTIALLY_FILLED"
+                and result.executed_amount > 0
+            ):
+                try:
+                    state = self._state_store.load()
+                    if state is None:
+                        raise LiveGateError(
+                            f"約定同期: LiveState が存在しません (order_id={result.db_order_id})"
+                        )
+                    side = result.side.upper()
+                    if side == "BUY":
+                        state.position_size = result.executed_amount
+                        state.entry_price = result.average_price
+                        state.position_entry_price = result.average_price
+                        state.position_entry_time = now_jst().isoformat()
+                    elif side == "SELL":
+                        state.position_size = max(
+                            0.0, state.position_size - result.executed_amount
+                        )
+                        if state.position_size == 0.0:
+                            state.entry_price = 0.0
+                            state.position_entry_price = 0.0
+                            state.position_entry_time = None
+                    state.updated_at = now_jst().isoformat()
+                    self._state_store.save(state)
+                    logger.warning(
+                        "live engine: キャンセル部分約定 LiveState 更新 order_id=%s side=%s amount=%.4f price=%.0f",
+                        result.db_order_id, side, result.executed_amount, result.average_price,
+                    )
+                except LiveGateError:
+                    raise
+                except Exception:
+                    raise LiveGateError(
+                        f"約定同期: LiveState の更新に失敗しました (order_id={result.db_order_id})"
+                    )
+
     # ------------------------------------------------------------------
     # 内部ヘルパー
     # ------------------------------------------------------------------
@@ -467,10 +519,21 @@ class LiveEngine:
                 order_type="market",
                 size=size,
             )
-            logger.info(
-                "live engine: 注文発行 pair=%s side=%s size=%.4f order_id=%s status=%s",
-                pair, side, size, result.order_id, result.status,
+        except DuplicateOrderError:
+            logger.warning(
+                "live engine: pair=%s に既存のアクティブ注文があるため発注をスキップ", pair
             )
+            return False
+        except Exception:
+            logger.exception("live engine: 注文発行中に予期しないエラーが発生")
+            return False
+
+        logger.info(
+            "live engine: 注文発行 pair=%s side=%s size=%.4f order_id=%s status=%s",
+            pair, side, size, result.order_id, result.status,
+        )
+
+        try:
             self._storage.insert_audit_log(
                 "order_submitted",
                 strategy=self._strategy.name,
@@ -478,17 +541,16 @@ class LiveEngine:
                 signal_confidence=pending_signal.confidence,
                 signal_reason=pending_signal.reason,
             )
-            return True
-
-        except DuplicateOrderError:
-            logger.warning(
-                "live engine: pair=%s に既存のアクティブ注文があるため発注をスキップ", pair
-            )
-            return False
-
         except Exception:
-            logger.exception("live engine: 注文発行中に予期しないエラーが発生")
-            return False
+            logger.exception(
+                "live engine: order_submitted 監査ログの記録に失敗 (order_id=%s) — 停止します",
+                result.order_id,
+            )
+            raise LiveGateError(
+                f"order_submitted 監査ログの記録に失敗しました (order_id={result.order_id})"
+            )
+
+        return True
 
     def _load_ohlcv(self) -> pd.DataFrame | None:
         """ウォームアップ込みの OHLCV データを Storage から取得する。"""
@@ -498,6 +560,7 @@ class LiveEngine:
                 pair=self._settings.pair,
                 timeframe=self._settings.timeframe,
                 verify=True,
+                fail_closed=True,
             )
             if len(data) < needed:
                 logger.warning(

@@ -865,6 +865,87 @@ class TestSubmitPendingSize:
 
 
 # ------------------------------------------------------------------ #
+# _submit_pending: 監査ログ fail-closed (NF3)
+# ------------------------------------------------------------------ #
+
+class TestSubmitPendingAuditLog:
+    """_submit_pending() の order_submitted 監査ログ fail-closed テスト。"""
+
+    @pytest.fixture()
+    def engine_with_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> LiveEngine:
+        _seed_state(state_store, balance=1_000_000.0)
+        existing = state_store.load()
+        existing.last_price = 5_000_000.0
+        state_store.save(existing)
+        return _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+
+    @pytest.mark.asyncio
+    async def test_audit_log_failure_raises_live_gate_error(
+        self, engine_with_state, storage
+    ) -> None:
+        """place_order() 成功後に insert_audit_log() が失敗すると LiveGateError が raise される。"""
+        from cryptbot.live.gate import LiveGateError
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+
+        with patch.object(storage, "insert_audit_log", side_effect=RuntimeError("DB error")):
+            with pytest.raises(LiveGateError, match="order_submitted"):
+                await engine_with_state._submit_pending(
+                    pending_signal=buy_signal,
+                    cvar_action="normal",
+                    current_bar_ts=datetime.now(JST),
+                    portfolio=portfolio,
+                    current_price=5_000_000.0,
+                )
+
+        engine_with_state._executor.place_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_audit_log_success_returns_true(
+        self, engine_with_state
+    ) -> None:
+        """place_order() と insert_audit_log() が両方成功すると True を返す。"""
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+
+        result = await engine_with_state._submit_pending(
+            pending_signal=buy_signal,
+            cvar_action="normal",
+            current_bar_ts=datetime.now(JST),
+            portfolio=portfolio,
+            current_price=5_000_000.0,
+        )
+
+        assert result is True
+        engine_with_state._executor.place_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_place_order_failure_returns_false_without_audit_log(
+        self, engine_with_state, storage
+    ) -> None:
+        """place_order() 失敗時は False を返し insert_audit_log() を呼ばない。"""
+        buy_signal = Signal(Direction.BUY, 1.0, "test_buy", datetime.now(JST))
+        portfolio = _make_portfolio(balance=1_000_000.0)
+
+        engine_with_state._executor.place_order.side_effect = RuntimeError("exchange error")
+        with patch.object(storage, "insert_audit_log") as mock_audit:
+            result = await engine_with_state._submit_pending(
+                pending_signal=buy_signal,
+                cvar_action="normal",
+                current_bar_ts=datetime.now(JST),
+                portfolio=portfolio,
+                current_price=5_000_000.0,
+            )
+
+        assert result is False
+        mock_audit.assert_not_called()
+
+
+# ------------------------------------------------------------------ #
 # _record_signal: fail-closed (F7)
 # ------------------------------------------------------------------ #
 
@@ -1100,3 +1181,203 @@ class TestPollActiveOrdersLiveStateSync:
             with patch.object(state_store, "save", side_effect=RuntimeError("DB error")):
                 with pytest.raises(LiveGateError):
                     await engine._poll_active_orders()
+
+
+# ------------------------------------------------------------------ #
+# NF4: CANCELED_PARTIALLY_FILLED の LiveState 反映
+# ------------------------------------------------------------------ #
+
+class TestPollActiveOrdersCanceledPartiallyFilled:
+    """NF4: CANCELED_PARTIALLY_FILLED 時に LiveState を部分約定分で更新するテスト。"""
+
+    @pytest.mark.asyncio
+    async def test_buy_canceled_partially_filled_updates_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """BUY CANCELED_PARTIALLY_FILLED かつ executed_amount > 0 で LiveState.position_size が更新される。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+
+        buy_order = {
+            "id": 20,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_200",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=20,
+            side="BUY",
+            status="CANCELED_PARTIALLY_FILLED",
+            executed_amount=0.02,
+            average_price=5_100_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.02)
+        assert state.entry_price == pytest.approx(5_100_000.0)
+        assert state.position_entry_price == pytest.approx(5_100_000.0)
+        assert state.position_entry_time is not None
+
+    @pytest.mark.asyncio
+    async def test_sell_canceled_partially_filled_reduces_position(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """SELL CANCELED_PARTIALLY_FILLED で LiveState.position_size が部分売却分だけ減る。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+        state = state_store.load()
+        state.position_size = 0.1
+        state.entry_price = 5_000_000.0
+        state_store.save(state)
+
+        sell_order = {
+            "id": 21,
+            "status": "SUBMITTED",
+            "side": "SELL",
+            "exchange_order_id": "EX_201",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=21,
+            side="SELL",
+            status="CANCELED_PARTIALLY_FILLED",
+            executed_amount=0.04,
+            average_price=5_200_000.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[sell_order]):
+            await engine._poll_active_orders()
+
+        state = state_store.load()
+        assert state is not None
+        assert state.position_size == pytest.approx(0.06)  # 0.1 - 0.04
+
+    @pytest.mark.asyncio
+    async def test_canceled_unfilled_does_not_update_live_state(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """CANCELED_UNFILLED（executed_amount=0）で LiveState は変化しない。"""
+        from cryptbot.execution.live_executor import OrderSyncResult
+        _seed_state(state_store, balance=1_000_000.0)
+        state_before = state_store.load()
+
+        buy_order = {
+            "id": 22,
+            "status": "SUBMITTED",
+            "side": "BUY",
+            "exchange_order_id": "EX_202",
+            "created_at": "2024-01-01T09:00:00+09:00",
+        }
+        mock_executor.handle_partial_fill = AsyncMock(return_value=OrderSyncResult(
+            db_order_id=22,
+            side="BUY",
+            status="CANCELED_UNFILLED",
+            executed_amount=0.0,
+            average_price=0.0,
+            terminal=True,
+        ))
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        with patch.object(storage, "get_active_orders", return_value=[buy_order]):
+            await engine._poll_active_orders()
+
+        state_after = state_store.load()
+        assert state_after.position_size == state_before.position_size
+        assert state_after.entry_price == state_before.entry_price
+
+
+# ------------------------------------------------------------------ #
+# _bar_loop: update_latest() 戻り値ハンドリング
+# ------------------------------------------------------------------ #
+
+class TestBarLoopUpdateLatest:
+    """_bar_loop が update_latest() の戻り値を正しく処理することを確認する。"""
+
+    def _make_engine_with_updater(
+        self,
+        risk_manager: RiskManager,
+        state_store: LiveStateStore,
+        storage: Storage,
+        mock_executor: MagicMock,
+        settings: LiveSettings,
+        update_latest_returns: list[bool],
+    ) -> tuple["LiveEngine", MagicMock]:
+        engine = _make_engine(
+            AlwaysHoldStrategy(), risk_manager, state_store, storage, mock_executor, settings
+        )
+        updater = MagicMock()
+        # update_latest_returns のシーケンスを返す AsyncMock
+        updater.update_latest = AsyncMock(side_effect=update_latest_returns)
+        engine._ohlcv_updater = updater
+        return engine, updater
+
+    @pytest.mark.asyncio
+    async def test_false_skips_run_one_bar(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """update_latest() が False を返したとき run_one_bar() を呼ばない。"""
+        _seed_state(state_store)
+        # 1回 False を返した後は StopAsyncIteration でループを終わらせる
+        engine, updater = self._make_engine_with_updater(
+            risk_manager, state_store, storage, mock_executor, settings,
+            update_latest_returns=[False, Exception("stop")],
+        )
+        engine.run_one_bar = AsyncMock()
+
+        with patch.object(engine, "_wait_for_next_bar", new_callable=AsyncMock):
+            with pytest.raises(Exception, match="stop"):
+                await engine._bar_loop()
+
+        engine.run_one_bar.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_true_calls_run_one_bar(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """update_latest() が True を返したとき run_one_bar() が呼ばれる。"""
+        _seed_state(state_store)
+        engine, updater = self._make_engine_with_updater(
+            risk_manager, state_store, storage, mock_executor, settings,
+            update_latest_returns=[True, Exception("stop")],
+        )
+        ohlcv = _make_ohlcv()
+        engine._load_ohlcv = MagicMock(return_value=ohlcv)
+        engine.run_one_bar = AsyncMock()
+
+        with patch.object(engine, "_wait_for_next_bar", new_callable=AsyncMock):
+            with pytest.raises(Exception, match="stop"):
+                await engine._bar_loop()
+
+        engine.run_one_bar.assert_called_once_with(ohlcv)
+
+    @pytest.mark.asyncio
+    async def test_three_consecutive_failures_raise_live_gate_error(
+        self, risk_manager, state_store, storage, mock_executor, settings
+    ) -> None:
+        """update_latest() が連続 3 回 False を返したとき LiveGateError が raise される。"""
+        from cryptbot.live.gate import LiveGateError
+
+        _seed_state(state_store)
+        engine, updater = self._make_engine_with_updater(
+            risk_manager, state_store, storage, mock_executor, settings,
+            update_latest_returns=[False, False, False],
+        )
+        engine.run_one_bar = AsyncMock()
+
+        with patch.object(engine, "_wait_for_next_bar", new_callable=AsyncMock):
+            with pytest.raises(LiveGateError, match="OHLCV 連続更新失敗"):
+                await engine._bar_loop()
+
+        engine.run_one_bar.assert_not_called()

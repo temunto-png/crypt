@@ -104,7 +104,16 @@ def _build_ml_components(settings):
             ml_model = manager.load_model(model_settings.active_experiment_id, model_cls)
             records = [r for r in manager.list_experiments()
                        if r.experiment_id == model_settings.active_experiment_id]
-            baseline = records[0].metrics.get("accuracy", 0.6) if records else 0.6
+            if records:
+                baseline = records[0].metrics.get("mean_confidence")
+            else:
+                baseline = None
+            if baseline is None:
+                logger.error(
+                    "mean_confidence が metrics に存在しません: experiment_id=%s",
+                    model_settings.active_experiment_id,
+                )
+                return None
         except FileNotFoundError:
             logger.error("ML モデルが見つかりません: %s", model_settings.active_experiment_id)
             return None
@@ -118,7 +127,13 @@ def _build_ml_components(settings):
         if ml_model is None:
             logger.error("ML が enabled ですがモデルファイルのロードに失敗しました")
             return None
-        baseline = records[0].metrics.get("accuracy", 0.6)
+        baseline = records[0].metrics.get("mean_confidence")
+        if baseline is None:
+            logger.error(
+                "mean_confidence が metrics に存在しません: experiment_id=%s",
+                "（最新実験）",
+            )
+            return None
 
     degradation_detector = DegradationDetector(
         baseline_confidence=baseline,

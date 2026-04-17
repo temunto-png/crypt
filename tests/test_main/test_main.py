@@ -219,7 +219,7 @@ class TestBuildMlComponents:
             val_start="2024-06-01",
             val_end="2024-12-01",
             params={},
-            metrics={"accuracy": 0.65},
+            metrics={"accuracy": 0.65, "mean_confidence": 0.62},
             model_path="test_lgbm_20240101_000000.pkl",
             created_at="2024-01-01T00:00:00",
         )
@@ -244,6 +244,108 @@ class TestBuildMlComponents:
                 "experiments_dir": str(tmp_path / "experiments"),
                 "model_type": "lgbm",
                 "active_experiment_id": "nonexistent_id",
+            },
+        )
+        result = _build_ml_components(settings)
+        assert result is None
+
+    def _save_model_with_metrics(self, tmp_path: Path, metrics: dict, experiment_id: str = "exp_20240101_000000"):
+        """LightGBM モデルを訓練・保存し、ExperimentManager を返す。"""
+        import numpy as np
+        import pandas as pd
+        from cryptbot.models.experiment_manager import ExperimentManager, ExperimentRecord
+        from cryptbot.models.lgbm_model import LightGBMModel
+
+        exp_dir = tmp_path / "experiments"
+        exp_dir.mkdir(exist_ok=True)
+        manager = ExperimentManager(base_dir=str(exp_dir))
+
+        feature_cols = [f"f{i}" for i in range(10)]
+        X = pd.DataFrame(np.random.rand(60, 10), columns=feature_cols)
+        y = pd.Series(np.random.randint(0, 2, 60))
+        model = LightGBMModel(params={"num_leaves": 4, "verbose": -1, "n_estimators": 2})
+        model.fit(X, y)
+
+        record = ExperimentRecord(
+            experiment_id=experiment_id,
+            model_name="lgbm",
+            label_type="binary",
+            horizon=1,
+            train_start="2024-01-01",
+            train_end="2024-06-01",
+            val_start="2024-06-01",
+            val_end="2024-12-01",
+            params={},
+            metrics=metrics,
+            model_path=f"{experiment_id}.pkl",
+            created_at="2024-01-01T00:00:00",
+        )
+        manager.save_experiment(model, record)
+        return manager
+
+    def test_mean_confidence_used_as_baseline(self, tmp_path: Path) -> None:
+        """mean_confidence=0.62 が metrics にある場合、baseline_confidence == 0.62 になる。"""
+        from cryptbot.main import _build_ml_components
+        from cryptbot.models.degradation_detector import DegradationDetector
+
+        self._save_model_with_metrics(tmp_path, metrics={"mean_confidence": 0.62})
+
+        settings = self._make_settings_ml_enabled(tmp_path)
+        result = _build_ml_components(settings)
+        assert result is not None
+        _, detector = result
+        assert isinstance(detector, DegradationDetector)
+        assert detector._baseline == 0.62
+
+    def test_missing_mean_confidence_no_active_id_returns_none(self, tmp_path: Path) -> None:
+        """accuracy はあるが mean_confidence がない場合、fail-closed で None を返す（active_experiment_id なし）。"""
+        from cryptbot.main import _build_ml_components
+
+        self._save_model_with_metrics(tmp_path, metrics={"accuracy": 0.95})
+
+        settings = self._make_settings_ml_enabled(tmp_path)
+        result = _build_ml_components(settings)
+        assert result is None
+
+    def test_active_id_with_mean_confidence_uses_baseline(self, tmp_path: Path) -> None:
+        """active_experiment_id 指定あり + mean_confidence=0.55 → baseline_confidence == 0.55。"""
+        from cryptbot.config.settings import Settings
+        from cryptbot.main import _build_ml_components
+        from cryptbot.models.degradation_detector import DegradationDetector
+
+        exp_id = "exp_active_20240101_000000"
+        self._save_model_with_metrics(tmp_path, metrics={"mean_confidence": 0.55}, experiment_id=exp_id)
+
+        settings = Settings(
+            _env_file=None,
+            model={
+                "enabled": True,
+                "experiments_dir": str(tmp_path / "experiments"),
+                "model_type": "lgbm",
+                "active_experiment_id": exp_id,
+            },
+        )
+        result = _build_ml_components(settings)
+        assert result is not None
+        _, detector = result
+        assert isinstance(detector, DegradationDetector)
+        assert detector._baseline == 0.55
+
+    def test_active_id_missing_mean_confidence_returns_none(self, tmp_path: Path) -> None:
+        """active_experiment_id 指定あり + mean_confidence なし → fail-closed で None を返す。"""
+        from cryptbot.config.settings import Settings
+        from cryptbot.main import _build_ml_components
+
+        exp_id = "exp_nomc_20240101_000000"
+        self._save_model_with_metrics(tmp_path, metrics={"accuracy": 0.80}, experiment_id=exp_id)
+
+        settings = Settings(
+            _env_file=None,
+            model={
+                "enabled": True,
+                "experiments_dir": str(tmp_path / "experiments"),
+                "model_type": "lgbm",
+                "active_experiment_id": exp_id,
             },
         )
         result = _build_ml_components(settings)

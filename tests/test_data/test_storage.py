@@ -874,3 +874,86 @@ class TestLoadOhlcvVerify:
 
         df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
         assert df.empty, "全不正ファイルなのに空 DataFrame が返らなかった"
+
+
+# ------------------------------------------------------------------ #
+# NF5: verify_ohlcv_integrity を load_ohlcv(verify=True) で呼ぶ
+# ------------------------------------------------------------------ #
+
+class TestVerifyOhlcvIntegrityInLoadOhlcv:
+    """load_ohlcv(verify=True) が verify_ohlcv_integrity() を呼び出すことを検証する。"""
+
+    def test_hash_match_loads_successfully(self, tmp_path: Path) -> None:
+        """ハッシュが一致する場合、ファイルが正常にロードされる。"""
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True)
+        assert len(df) == 3, "ハッシュ一致なのにファイルがスキップされた"
+
+    def test_hash_mismatch_fail_closed_false_skips_file(self, tmp_path: Path) -> None:
+        """ハッシュ不一致・fail_closed=False の場合、ファイルをスキップして空 DataFrame を返す。"""
+        import pyarrow as pa
+        import pyarrow.parquet as pq_lib
+
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        # DB に保存されたハッシュを維持したまま、別の有効な Parquet で上書き（ハッシュ不一致を再現）
+        parquet_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2024.parquet"
+        df_different = _make_valid_df(year=2024, n=5)  # 行数が違うファイルで上書き
+        table = pa.Table.from_pandas(df_different)
+        pq_lib.write_table(table, parquet_path)
+
+        df = storage.load_ohlcv("btc_jpy", "1hour", verify=True, fail_closed=False)
+        assert df.empty, "ハッシュ不一致なのにファイルがロードされた"
+
+    def test_hash_mismatch_fail_closed_true_raises(self, tmp_path: Path) -> None:
+        """ハッシュ不一致・fail_closed=True の場合、ValueError が raise される。"""
+        import pyarrow as pa
+        import pyarrow.parquet as pq_lib
+
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        # DB に保存されたハッシュを維持したまま、別の有効な Parquet で上書き（ハッシュ不一致を再現）
+        parquet_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2024.parquet"
+        df_different = _make_valid_df(year=2024, n=5)
+        table = pa.Table.from_pandas(df_different)
+        pq_lib.write_table(table, parquet_path)
+
+        with pytest.raises(ValueError, match="ハッシュ検証失敗"):
+            storage.load_ohlcv("btc_jpy", "1hour", verify=True, fail_closed=True)
+
+    def test_data_hash_none_fail_closed_true_raises(self, tmp_path: Path) -> None:
+        """data_hash=None（ハッシュ未計算）・fail_closed=True の場合、ValueError が raise される。"""
+        import sqlite3
+
+        storage = Storage(db_path=tmp_path / "test.db", data_dir=tmp_path / "data")
+        storage.initialize()
+
+        df_valid = _make_valid_df(year=2024, n=3)
+        storage.save_ohlcv(df_valid, "btc_jpy", "1hour", 2024)
+
+        # DB の data_hash を空文字にして「ハッシュ未計算」状態を再現
+        # （verify_ohlcv_integrity は空文字の場合 False を返す）
+        parquet_path = tmp_path / "data" / "btc_jpy" / "1hour" / "2024.parquet"
+        conn = sqlite3.connect(storage._db_path)
+        conn.execute(
+            "UPDATE ohlcv_metadata SET data_hash = '' WHERE pair = ? AND timeframe = ? AND file_path = ?",
+            ("btc_jpy", "1hour", str(parquet_path)),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(ValueError, match="ハッシュ検証失敗"):
+            storage.load_ohlcv("btc_jpy", "1hour", verify=True, fail_closed=True)
