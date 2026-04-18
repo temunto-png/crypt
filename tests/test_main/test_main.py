@@ -39,7 +39,7 @@ def _make_ohlcv_and_store(tmp_path: Path, rows: int = 55) -> tuple[Path, Path]:
         "volume": [1.0] * rows,
     })
     df = normalize(df)
-    storage.save_ohlcv(df, pair="btc_jpy", timeframe="1hour", year=2024)
+    storage.save_ohlcv(df, pair="btc_jpy", timeframe="15min", year=2024)
 
     return db_path, data_dir
 

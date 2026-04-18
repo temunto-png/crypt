@@ -72,18 +72,22 @@ class PaperSettings(BaseModel):
 
     initial_balance: float = Field(default=1_000_000.0, gt=0)
     pair: str = "btc_jpy"
-    timeframe: str = "1hour"
+    timeframe: str = "15min"
     warmup_bars: int = Field(default=50, gt=0)
-    strategy_name: _StrategyName = "ma_cross"
+    strategy_name: _StrategyName = "momentum"
+    momentum_threshold: float = Field(default=3.0, gt=0)
+    momentum_window: int = Field(default=20, gt=0)
 
 
 class LiveSettings(BaseModel):
     """Live trading エンジンの設定。"""
 
     pair: str = "btc_jpy"
-    timeframe: str = "1hour"
+    timeframe: str = "15min"
     warmup_bars: int = Field(default=50, gt=0)
-    strategy_name: _StrategyName = "ma_cross"
+    strategy_name: _StrategyName = "momentum"
+    momentum_threshold: float = Field(default=3.0, gt=0)
+    momentum_window: int = Field(default=20, gt=0)
     partial_fill_poll_interval_sec: int = Field(default=1800, ge=60)
     balance_sync_tolerance_pct: float = Field(default=0.001, gt=0, lt=1)
     order_timeout_sec: int = Field(default=7200, ge=300)
