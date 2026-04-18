@@ -1004,3 +1004,54 @@ class TestApplyMlFilter:
         )
         assert result.direction == Direction.HOLD
         assert result.confidence == 0.0
+
+
+# ------------------------------------------------------------------ #
+# Kill switch WF 窓間分離テスト
+# ------------------------------------------------------------------ #
+
+def test_walk_forward_killswitch_reset_between_windows(tmp_path: Path) -> None:
+    """学習窓で KillSwitch が発動しても検証窓がスキップされないこと。"""
+    from cryptbot.config.settings import CircuitBreakerSettings, CvarSettings
+    from cryptbot.risk.kill_switch import KillSwitch, KillSwitchReason
+
+    storage = Storage(db_path=tmp_path / "ks.db", data_dir=tmp_path / "data")
+    storage.initialize()
+    ks = KillSwitch(storage)
+
+    cb = CircuitBreakerSettings(
+        max_trade_loss_pct=0.02,
+        daily_loss_pct=0.03,
+        weekly_loss_pct=0.05,
+        monthly_loss_pct=0.10,
+        max_drawdown_pct=0.15,
+        max_consecutive_losses=5,
+    )
+    cvar = CvarSettings(warn_pct=-0.03, half_pct=-0.04, stop_pct=-0.05)
+    rm = RiskManager(cb, cvar, ks)
+
+    start = datetime(2023, 1, 1, tzinfo=JST)
+    data = _make_ohlcv(n=2200, start=start)
+
+    engine = BacktestEngine(
+        strategy=BuyAndHoldStrategy(),
+        risk_manager=rm,
+        initial_balance=500_000.0,
+    )
+
+    # 事前に kill switch を activate（学習窓で発動した状態を模倣）
+    ks.activate(KillSwitchReason.MAX_DRAWDOWN, portfolio_value=500_000.0, drawdown_pct=0.2)
+    assert ks.active is True
+
+    results = engine.run_walk_forward(
+        data,
+        train_months=2,
+        validation_months=1,
+        step_months=1,
+        warmup_bars=20,
+    )
+
+    # kill switch リセットが機能していれば検証窓に結果が存在する
+    assert len(results) > 0, "kill switch が窓間でリセットされず全検証窓がスキップされた"
+    non_empty = [r for r in results if len(r.trades) > 0]
+    assert len(non_empty) > 0, "すべての検証窓でトレードが0件（kill switch ブロックの可能性）"

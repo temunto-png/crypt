@@ -712,13 +712,15 @@ class BacktestEngine:
                 window_start = window_start + pd.DateOffset(months=step_months)
                 continue
 
-            # 学習期間: strategy をリセットしてから実行（ステート汚染防止）
+            # 学習期間: strategy と kill switch をリセットしてから実行（ステート汚染防止）
             if len(train_data) > warmup_bars:
                 self._strategy.reset()
+                self._risk_manager._kill_switch.reset()
                 self.run(train_data, warmup_bars=warmup_bars)
 
-            # 検証期間: strategy を再リセットして独立実行
+            # 検証期間: strategy と kill switch を再リセットして独立実行
             self._strategy.reset()
+            self._risk_manager._kill_switch.reset()
             result = self.run(val_data, warmup_bars=min(warmup_bars, len(val_data) // 2))
             results.append(result)
 

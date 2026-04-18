@@ -483,3 +483,35 @@ def test_check_circuit_breakers_no_trigger(
     triggered = rm.check_circuit_breakers(portfolio, mark_balance)
     assert triggered is False
     assert kill_switch.active is False
+
+
+# ------------------------------------------------------------------ #
+# KillSwitch.reset() テスト
+# ------------------------------------------------------------------ #
+
+def test_kill_switch_reset_clears_active_state(storage: Storage) -> None:
+    """reset() を呼ぶと active が False になること（audit_log 書き込みなし）。"""
+    ks = KillSwitch(storage)
+    ks.activate(KillSwitchReason.MAX_DRAWDOWN, portfolio_value=1_000_000.0, drawdown_pct=0.2)
+    assert ks.active is True
+
+    ks.reset()
+
+    assert ks.active is False
+    assert ks.reason is None
+
+
+def test_kill_switch_reset_does_not_write_audit_log(storage: Storage) -> None:
+    """reset() は audit_log に KILL_SWITCH_DEACTIVATED を書かないこと。"""
+    ks = KillSwitch(storage)
+    ks.activate(KillSwitchReason.MANUAL, portfolio_value=1_000_000.0, drawdown_pct=0.0)
+    ks.reset()
+
+    with storage._connect() as conn:
+        rows = conn.execute(
+            "SELECT event_type FROM audit_log ORDER BY id"
+        ).fetchall()
+
+    event_types = [r["event_type"] for r in rows]
+    assert "KILL_SWITCH_ACTIVATED" in event_types
+    assert "KILL_SWITCH_DEACTIVATED" not in event_types
