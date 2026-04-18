@@ -83,10 +83,14 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return adx
 
 
-def normalize(df: pd.DataFrame) -> pd.DataFrame:
+def normalize(df: pd.DataFrame, momentum_window: int = 5) -> pd.DataFrame:
     """OHLCV DataFrame に全テクニカル指標カラムを付与して返す。
 
     入力 DataFrame に必要なカラム: open, high, low, close, volume
+
+    Args:
+        df: OHLCV DataFrame
+        momentum_window: momentum 計算に使う pct_change のバー数（デフォルト: 5）
 
     Returns:
         入力 df のコピーに以下のカラムを追加したもの:
@@ -122,8 +126,8 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     result["bb_lower"] = result["sma_short"] - 2 * bb_std
     result["bb_bandwidth"] = (result["bb_upper"] - result["bb_lower"]) / result["sma_short"] * 100
 
-    # Momentum（5バー窓: 取引頻度向上のため14→5に変更）
-    result["momentum"] = close.pct_change(5) * 100
+    # Momentum
+    result["momentum"] = close.pct_change(momentum_window) * 100
 
     # Volume MA Ratio
     result["volume_ma_ratio"] = volume / volume.rolling(20).mean()
