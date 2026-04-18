@@ -122,8 +122,8 @@ def normalize(df: pd.DataFrame) -> pd.DataFrame:
     result["bb_lower"] = result["sma_short"] - 2 * bb_std
     result["bb_bandwidth"] = (result["bb_upper"] - result["bb_lower"]) / result["sma_short"] * 100
 
-    # Momentum
-    result["momentum"] = close.pct_change(14) * 100
+    # Momentum（5バー窓: 取引頻度向上のため14→5に変更）
+    result["momentum"] = close.pct_change(5) * 100
 
     # Volume MA Ratio
     result["volume_ma_ratio"] = volume / volume.rolling(20).mean()

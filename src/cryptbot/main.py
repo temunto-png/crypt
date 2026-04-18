@@ -2,11 +2,13 @@
 
 paper モードは 1 バー処理して終了する（cron 呼び出し前提）。
 live モードは asyncio 永続プロセスとして動作する。
+fetch-ohlcv モードは OHLCV データのバックフィルのみを実行して終了する。
 
 使用例:
   python -m cryptbot.main --help
   python -m cryptbot.main                                   # paper モードで 1 バー処理
   python -m cryptbot.main --mode live --confirm-live        # live モードで起動
+  python -m cryptbot.main --mode fetch-ohlcv               # OHLCV バックフィルのみ実行
 """
 from __future__ import annotations
 
@@ -49,7 +51,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["paper", "live"],
+        choices=["paper", "live", "fetch-ohlcv", "backtest"],
         default="paper",
         help="実行モード（デフォルト: paper）",
     )
@@ -68,6 +70,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default="data/",
         help="OHLCV Parquet ディレクトリ（デフォルト: data/）",
+    )
+    parser.add_argument(
+        "--backfill-years",
+        type=int,
+        default=None,
+        dest="backfill_years",
+        help="fetch-ohlcv モード: 取得する年数（省略時は設定値を使用）",
     )
     return parser
 
@@ -227,6 +236,131 @@ def _run_paper(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_backtest(args: argparse.Namespace) -> int:
+    """バックテストを実行して Live 移行可否を判定する。"""
+    from cryptbot.backtest.benchmark import (
+        calculate_buy_and_hold,
+        check_live_readiness,
+    )
+    from cryptbot.backtest.engine import BacktestEngine
+    from cryptbot.backtest.metrics import calculate_metrics
+    from cryptbot.config.settings import load_settings
+    from cryptbot.data.normalizer import normalize
+    from cryptbot.data.storage import Storage
+    from cryptbot.risk.kill_switch import KillSwitch
+    from cryptbot.risk.manager import RiskManager
+
+    settings = load_settings()
+    storage = Storage(db_path=Path(args.db), data_dir=Path(args.data_dir))
+
+    try:
+        data = storage.load_ohlcv(
+            pair=settings.paper.pair,
+            timeframe=settings.paper.timeframe,
+        )
+    except Exception as exc:
+        print(f"[ERROR] OHLCV データ読み込み失敗: {exc}", file=sys.stderr)
+        return 1
+
+    if len(data) < 100:
+        print(f"[ERROR] データ不足: {len(data)} 本。先に fetch-ohlcv を実行してください。", file=sys.stderr)
+        return 1
+
+    print(f"[INFO] データ読み込み完了: {len(data)} 本  "
+          f"{data['timestamp'].iloc[0]} 〜 {data['timestamp'].iloc[-1]}")
+
+    data = normalize(data)
+    print(f"[INFO] 正規化完了（indicators 追加済み）")
+
+    # コンポーネント組み立て（DB は不要なのでメモリダミー）
+    kill_switch = KillSwitch(storage)
+    risk_manager = RiskManager(
+        settings=settings.circuit_breaker,
+        cvar_settings=settings.cvar,
+        kill_switch=kill_switch,
+    )
+    strategy = _resolve_strategy(settings.paper.strategy_name)
+
+    engine = BacktestEngine(
+        strategy=strategy,
+        risk_manager=risk_manager,
+        initial_balance=1_000_000.0,
+    )
+
+    warmup = settings.paper.warmup_bars
+    result = engine.run(data, warmup_bars=warmup)
+    metrics = calculate_metrics(result)
+    strategy_return_pct = metrics.total_pnl / result.initial_balance * 100
+    bah = calculate_buy_and_hold(data, strategy_return_pct=strategy_return_pct)
+    readiness = check_live_readiness(
+        metrics,
+        cvar_warn_pct=settings.cvar.warn_pct * 100,
+        bah_result=bah,
+    )
+
+    # 結果表示
+    print("\n===== バックテスト結果 =====")
+    print(f"  期間: {result.start_time:%Y-%m-%d} 〜 {result.end_time:%Y-%m-%d}")
+    print(f"  初期残高: {result.initial_balance:,.0f} JPY")
+    print(f"  最終残高: {result.final_balance:,.0f} JPY")
+    print(f"  総損益:   {metrics.total_pnl:+,.0f} JPY  ({metrics.total_pnl / result.initial_balance * 100:+.2f}%)")
+    print(f"  取引回数: {metrics.total_trades}")
+    print(f"  勝率:     {metrics.win_rate * 100:.1f}%")
+    print(f"  PF:       {metrics.profit_factor:.2f}")
+    print(f"  Sharpe:   {metrics.sharpe_ratio:.2f}")
+    print(f"  最大DD:   {metrics.max_drawdown_pct:.2f}%")
+    cvar_str = f"{metrics.cvar_95:.2f}%" if metrics.cvar_95 is not None else "N/A（サンプル不足）"
+    print(f"  CVaR95:   {cvar_str}")
+    print(f"\n  Buy & Hold: {bah.bah_return_pct:+.2f}%  (戦略: {bah.strategy_return_pct:+.2f}%)  alpha: {bah.alpha_pct:+.2f}%")
+
+    print("\n===== Live 移行可否 =====")
+    for name, passed, value in readiness.checks:
+        mark = "[PASS]" if passed else "[FAIL]"
+        print(f"  {mark} {name}: {value}")
+    print(f"\n  総合判定: {'[PASS]' if readiness.live_ready else '[FAIL]'}")
+
+    return 0 if readiness.live_ready else 1
+
+
+def _run_fetch_ohlcv(args: argparse.Namespace) -> int:
+    """OHLCV データをバックフィルして終了する（認証不要）。"""
+    from cryptbot.config.settings import load_settings
+    from cryptbot.data.fetcher import DataFetcher
+    from cryptbot.data.ohlcv_updater import OhlcvUpdater
+    from cryptbot.data.storage import Storage
+    from cryptbot.exchanges.bitbank import BitbankExchange
+
+    settings = load_settings()
+
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(db_path=Path(args.db), data_dir=data_dir)
+
+    pub_exchange = BitbankExchange()
+    fetcher = DataFetcher(exchange=pub_exchange, storage=storage)
+    backfill_years = args.backfill_years or settings.live.ohlcv_backfill_years
+    updater = OhlcvUpdater(
+        fetcher=fetcher,
+        pair=settings.live.pair,
+        timeframe=settings.live.timeframe,
+        backfill_years=backfill_years,
+    )
+
+    async def _fetch() -> int:
+        return await updater.backfill()
+
+    try:
+        n = asyncio.run(_fetch())
+        print(
+            f"[INFO] OHLCV バックフィル完了: {n} 本  "
+            f"pair={settings.live.pair}  tf={settings.live.timeframe}"
+        )
+        return 0
+    except Exception as exc:
+        print(f"[ERROR] OHLCV バックフィル失敗: {exc}", file=sys.stderr)
+        return 1
+
+
 def _run_live(args: argparse.Namespace) -> int:
     """live モードで asyncio 永続プロセスとして動作する。"""
     from cryptbot.config.settings import load_settings
@@ -359,6 +493,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode == "live":
         return _run_live(args)
+
+    if args.mode == "fetch-ohlcv":
+        return _run_fetch_ohlcv(args)
+
+    if args.mode == "backtest":
+        return _run_backtest(args)
 
     return _run_paper(args)
 

@@ -136,7 +136,122 @@ class TestGetOrderBook:
 
 
 class TestGetCandlesticks:
-    CANDLE_RESPONSE = {
+    # 長時間足（1day）は YYYY 形式で一括取得
+    CANDLE_RESPONSE_1DAY = {
+        "success": 1,
+        "data": {
+            "candlestick": [
+                {
+                    "type": "1day",
+                    "ohlcv": [
+                        ["14000000", "14200000", "13900000", "14100000", "5.0000", 1704067200000],
+                        ["14100000", "14300000", "14000000", "14200000", "3.0000", 1704153600000],
+                    ],
+                }
+            ],
+            "timestamp": 1704153600000,
+        },
+    }
+
+    @pytest.mark.asyncio
+    async def test_success_year_format(self) -> None:
+        """長時間足（1day）は YYYY 形式の単一 API コールで取得できる。"""
+        mock_get = AsyncMock(return_value=_make_response(self.CANDLE_RESPONSE_1DAY))
+        exchange = _make_bitbank(mock_get)
+
+        candles = await exchange.get_candlesticks("btc_jpy", "1day", 2024)
+
+        assert len(candles) == 2
+        c0 = candles[0]
+        assert c0.open == 14_000_000.0
+        assert c0.high == 14_200_000.0
+        assert c0.low == 13_900_000.0
+        assert c0.close == 14_100_000.0
+        assert c0.volume == 5.0
+        assert c0.timestamp.tzinfo is not None
+        assert str(c0.timestamp.tzinfo) == "Asia/Tokyo"
+        mock_get.assert_called_once_with(
+            "https://public.bitbank.cc/btc_jpy/candlestick/1day/2024"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_timeframe_raises_value_error(self) -> None:
+        mock_get = AsyncMock()
+        exchange = _make_bitbank(mock_get)
+
+        with pytest.raises(ValueError, match="無効な timeframe"):
+            await exchange.get_candlesticks("btc_jpy", "invalid_tf", 2024)
+
+        mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_valid_year_format_timeframes_accepted(self) -> None:
+        """長時間足（YYYY 形式）は単一コールで取得できる。"""
+        year_format_tfs = BitbankExchange.VALID_TIMEFRAMES - BitbankExchange._DAY_FORMAT_TIMEFRAMES
+        for tf in year_format_tfs:
+            response = {
+                "success": 1,
+                "data": {
+                    "candlestick": [{"type": tf, "ohlcv": []}],
+                    "timestamp": 1704067200000,
+                },
+            }
+            mock_get = AsyncMock(return_value=_make_response(response))
+            exchange = _make_bitbank(mock_get)
+            candles = await exchange.get_candlesticks("btc_jpy", tf, 2024)
+            assert isinstance(candles, list)
+
+    @pytest.mark.asyncio
+    async def test_valid_day_format_timeframes_accepted(self) -> None:
+        """短時間足（YYYYMMDD 形式）は日次コールで取得できる。"""
+        with patch("cryptbot.exchanges.bitbank.asyncio.sleep"):
+            for tf in BitbankExchange._DAY_FORMAT_TIMEFRAMES:
+                response = {
+                    "success": 1,
+                    "data": {
+                        "candlestick": [{"type": tf, "ohlcv": []}],
+                        "timestamp": 1704067200000,
+                    },
+                }
+                mock_get = AsyncMock(return_value=_make_response(response))
+                exchange = _make_bitbank(mock_get)
+                # 過去の完全な 1 ヶ月（2023-01）で日数を制御
+                candles = await exchange._get_candlesticks_by_day("btc_jpy", tf, 2023)
+                assert isinstance(candles, list)
+                # 2023 は過去の年なので 365 日分のリクエストが発生する
+                assert mock_get.call_count == 365
+
+    @pytest.mark.asyncio
+    async def test_timeframe_mismatch_raises_exchange_error(self) -> None:
+        """APIレスポンスの type フィールドが要求した timeframe と不一致の場合に ExchangeError を raise。"""
+        response = {
+            "success": 1,
+            "data": {
+                "candlestick": [
+                    {
+                        "type": "1week",  # 要求した 1day と不一致
+                        "ohlcv": [
+                            ["14000000", "14200000", "13900000", "14100000", "5.0000", 1704067200000],
+                        ],
+                    }
+                ],
+                "timestamp": 1704153600000,
+            },
+        }
+        mock_get = AsyncMock(return_value=_make_response(response))
+        exchange = _make_bitbank(mock_get)
+
+        with pytest.raises(ExchangeError) as exc_info:
+            await exchange.get_candlesticks("btc_jpy", "1day", 2024)
+
+        assert "1day" in str(exc_info.value)
+        assert "見つかりませんでした" in str(exc_info.value)
+
+
+class TestGetCandlesticksDayFormat:
+    """短時間足（YYYYMMDD 形式）の get_candlesticks テスト。"""
+
+    CANDLE_RESPONSE_1HOUR = {
         "success": 1,
         "data": {
             "candlestick": [
@@ -153,81 +268,53 @@ class TestGetCandlesticks:
     }
 
     @pytest.mark.asyncio
-    async def test_success_parses_ohlcv(self) -> None:
-        mock_get = AsyncMock(return_value=_make_response(self.CANDLE_RESPONSE))
-        exchange = _make_bitbank(mock_get)
+    async def test_day_format_calls_per_day(self) -> None:
+        """1hour は YYYYMMDD 形式で各日に 1 回 API を呼び出す。"""
+        with patch("cryptbot.exchanges.bitbank.asyncio.sleep"):
+            mock_get = AsyncMock(return_value=_make_response(self.CANDLE_RESPONSE_1HOUR))
+            exchange = _make_bitbank(mock_get)
 
-        candles = await exchange.get_candlesticks("btc_jpy", "1hour", 2024)
+            # 2023 は過去の完全な年（365 日）
+            candles = await exchange.get_candlesticks("btc_jpy", "1hour", 2023)
 
-        assert len(candles) == 2
-
-        c0 = candles[0]
-        assert c0.open == 14_000_000.0
-        assert c0.high == 14_200_000.0
-        assert c0.low == 13_900_000.0
-        assert c0.close == 14_100_000.0
-        assert c0.volume == 5.0
-        assert c0.timestamp.tzinfo is not None
-        assert str(c0.timestamp.tzinfo) == "Asia/Tokyo"
-
-        c1 = candles[1]
-        assert c1.open == 14_100_000.0
-
-        mock_get.assert_called_once_with(
-            "https://public.bitbank.cc/btc_jpy/candlestick/1hour/2024"
-        )
+        # 365 日 × 2 本 = 730 本
+        assert len(candles) == 365 * 2
+        assert mock_get.call_count == 365
+        # 最初のコールが 20230101 形式であることを確認
+        first_call_url = mock_get.call_args_list[0][0][0]
+        assert "20230101" in first_call_url
+        last_call_url = mock_get.call_args_list[-1][0][0]
+        assert "20231231" in last_call_url
 
     @pytest.mark.asyncio
-    async def test_invalid_timeframe_raises_value_error(self) -> None:
+    async def test_current_year_stops_at_yesterday(self) -> None:
+        """当年の場合は昨日まで取得する（当日分は update_latest で更新）。"""
+        from datetime import date, timedelta
+        with patch("cryptbot.exchanges.bitbank.asyncio.sleep"):
+            mock_get = AsyncMock(return_value=_make_response(self.CANDLE_RESPONSE_1HOUR))
+            exchange = _make_bitbank(mock_get)
+
+            current_year = date.today().year
+            candles = await exchange.get_candlesticks("btc_jpy", "1hour", current_year)
+
+        # 昨日まで = 今年の 1/1 から昨日まで
+        yesterday = date.today() - timedelta(days=1)
+        expected_days = (yesterday - date(current_year, 1, 1)).days + 1
+        assert mock_get.call_count == expected_days
+        assert len(candles) == expected_days * 2
+
+    @pytest.mark.asyncio
+    async def test_future_year_returns_empty(self) -> None:
+        """来年以降はデータなし（start > end）で空リストを返す。"""
+        from datetime import date
+        future_year = date.today().year + 1
         mock_get = AsyncMock()
         exchange = _make_bitbank(mock_get)
 
-        with pytest.raises(ValueError, match="無効な timeframe"):
-            await exchange.get_candlesticks("btc_jpy", "invalid_tf", 2024)
+        candles = await exchange.get_candlesticks("btc_jpy", "1hour", future_year)
 
+        assert candles == []
         mock_get.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_valid_timeframes_accepted(self) -> None:
-        """VALID_TIMEFRAMES 内の全タイプがエラーなく呼び出せることを確認する。"""
-        for tf in BitbankExchange.VALID_TIMEFRAMES:
-            response = {
-                "success": 1,
-                "data": {
-                    "candlestick": [{"type": tf, "ohlcv": []}],
-                    "timestamp": 1704067200000,
-                },
-            }
-            mock_get = AsyncMock(return_value=_make_response(response))
-            exchange = _make_bitbank(mock_get)
-            candles = await exchange.get_candlesticks("btc_jpy", tf, 2024)
-            assert isinstance(candles, list)
-
-    @pytest.mark.asyncio
-    async def test_timeframe_mismatch_raises_exchange_error(self) -> None:
-        """APIレスポンスの type フィールドが要求した timeframe と不一致の場合に ExchangeError を raise。"""
-        response = {
-            "success": 1,
-            "data": {
-                "candlestick": [
-                    {
-                        "type": "1day",  # 要求した 1hour と不一致
-                        "ohlcv": [
-                            ["14000000", "14200000", "13900000", "14100000", "5.0000", 1704067200000],
-                        ],
-                    }
-                ],
-                "timestamp": 1704153600000,
-            },
-        }
-        mock_get = AsyncMock(return_value=_make_response(response))
-        exchange = _make_bitbank(mock_get)
-
-        with pytest.raises(ExchangeError) as exc_info:
-            await exchange.get_candlesticks("btc_jpy", "1hour", 2024)
-
-        assert "1hour" in str(exc_info.value)
-        assert "見つかりませんでした" in str(exc_info.value)
 
 
 # ------------------------------------------------------------------ #

@@ -1,6 +1,9 @@
 """bitbank 取引所アダプター（Public API のみ、Phase 1 バックテスト用）。"""
 from __future__ import annotations
 
+import asyncio
+from datetime import date, timedelta
+
 import httpx
 from tenacity import (
     AsyncRetrying,
@@ -42,6 +45,9 @@ class BitbankExchange(BaseExchange):
         "1hour", "4hour", "8hour", "12hour",
         "1day", "1week", "1month",
     ])
+
+    # bitbank API の仕様: 短時間足は YYYYMMDD（日次）、長時間足は YYYY（年次）
+    _DAY_FORMAT_TIMEFRAMES = frozenset(["1min", "5min", "15min", "30min", "1hour"])
 
     def __init__(self, client: httpx.AsyncClient | None = None) -> None:
         """
@@ -120,7 +126,10 @@ class BitbankExchange(BaseExchange):
         timeframe: str,
         year: int,
     ) -> list[Candle]:
-        """GET /{pair}/candlestick/{timeframe}/{year} を呼び出して OHLCV を返す。
+        """指定した年の全 OHLCV を返す。
+
+        短時間足（1min/5min/15min/30min/1hour）は YYYYMMDD 形式で日次リクエストし
+        年全体を集約する。長時間足は YYYY 形式で一括取得する。
 
         Args:
             pair: 取引ペア（例: "btc_jpy"）
@@ -139,9 +148,49 @@ class BitbankExchange(BaseExchange):
                 f"無効な timeframe: {timeframe!r}。"
                 f" 有効な値: {sorted(self.VALID_TIMEFRAMES)}"
             )
-        data = await self._get(f"/{pair}/candlestick/{timeframe}/{year}")
-        candlestick_list = data["data"]["candlestick"]
+        if timeframe in self._DAY_FORMAT_TIMEFRAMES:
+            return await self._get_candlesticks_by_day(pair, timeframe, year)
+        return await self._get_candlesticks_by_year(pair, timeframe, year)
 
+    async def _get_candlesticks_by_year(
+        self, pair: str, timeframe: str, year: int
+    ) -> list[Candle]:
+        """長時間足: YYYY 形式で一括取得。"""
+        data = await self._get(f"/{pair}/candlestick/{timeframe}/{year}")
+        return self._parse_candlestick_response(data, timeframe)
+
+    async def _get_candlesticks_by_day(
+        self, pair: str, timeframe: str, year: int
+    ) -> list[Candle]:
+        """短時間足: YYYYMMDD 形式で日次リクエストし年全体を集約する。
+
+        当年の場合は昨日まで取得する（当日バーは未確定のため）。
+        """
+        today = date.today()
+        start = date(year, 1, 1)
+        # 当年は昨日まで（当日分は update_latest で都度更新）
+        end = min(date(year, 12, 31), today - timedelta(days=1))
+
+        if start > end:
+            return []
+
+        candles: list[Candle] = []
+        current = start
+        while current <= end:
+            date_str = current.strftime("%Y%m%d")
+            data = await self._get(f"/{pair}/candlestick/{timeframe}/{date_str}")
+            candles.extend(self._parse_candlestick_response(data, timeframe))
+            current += timedelta(days=1)
+            # レート制限回避: bitbank の公開 API は 1req/0.1s が安全な上限
+            await asyncio.sleep(0.15)
+
+        return candles
+
+    def _parse_candlestick_response(
+        self, data: dict, timeframe: str
+    ) -> list[Candle]:
+        """candlestick API レスポンスから Candle リストを生成する。"""
+        candlestick_list = data["data"]["candlestick"]
         candles: list[Candle] = []
         found = False
         for entry in candlestick_list:
@@ -160,13 +209,11 @@ class BitbankExchange(BaseExchange):
                         )
                     )
                 break
-
         if not found and candlestick_list:
             raise ExchangeError(
                 f"timeframe {timeframe!r} に対応するデータが見つかりませんでした",
                 status_code=None,
             )
-
         return candles
 
     # ------------------------------------------------------------------ #

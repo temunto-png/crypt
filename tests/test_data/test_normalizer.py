@@ -195,10 +195,10 @@ class TestNormalize:
         assert (non_nan > 0).all()
 
     def test_momentum_formula(self):
-        """momentum = close.pct_change(14) * 100 であること。"""
+        """momentum = close.pct_change(5) * 100 であること。"""
         df = make_ohlcv()
         result = normalize(df)
-        expected = df["close"].pct_change(14) * 100
+        expected = df["close"].pct_change(5) * 100
         pd.testing.assert_series_equal(result["momentum"], expected, check_names=False)
 
     def test_volume_ma_ratio_formula(self):

@@ -45,3 +45,13 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+
+# Claude Code（意図的に未追跡）
+.claude/
+CLAUDE.md
+docs/superpowers/
+
+# セッション引き継ぎ・レビュー用の一時ドキュメント（未追跡）
+*_handoff*.md
+codex_adversarial_review_recovery_*.md
+docs/ai_agent_tool_adoption_review*.md
