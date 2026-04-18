@@ -71,6 +71,16 @@ class KillSwitch:
 
         self._storage.insert_audit_log("KILL_SWITCH_DEACTIVATED")
 
+    def reset(self) -> None:
+        """インメモリの kill switch 状態をリセットする（audit_log 書き込みなし）。
+
+        Walk-Forward 検証でウィンドウをまたぐ際に呼び出す。
+        本番 live trading では使用しない。
+        """
+        self._active = False
+        self._reason = None
+        self._activated_at = None
+
     def load_state(self) -> None:
         """起動時に Storage から Kill switch の状態を復元する。
 
