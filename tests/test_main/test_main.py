@@ -352,6 +352,23 @@ class TestBuildMlComponents:
         assert result is None
 
 
+def test_resolve_strategy_uses_momentum_threshold():
+    """_resolve_strategy が threshold を戦略に渡すことを確認。"""
+    from cryptbot.main import _resolve_strategy
+    from cryptbot.strategies.momentum import MomentumStrategy
+    strategy = _resolve_strategy("momentum", threshold=3.0)
+    assert isinstance(strategy, MomentumStrategy)
+    assert strategy.threshold == 3.0
+
+
+def test_resolve_strategy_default_threshold():
+    from cryptbot.main import _resolve_strategy
+    from cryptbot.strategies.momentum import MomentumStrategy
+    strategy = _resolve_strategy("momentum")
+    assert isinstance(strategy, MomentumStrategy)
+    assert strategy.threshold == 2.0
+
+
 class TestOhlcvBackfill:
     def test_backfill_failure_returns_1(self, tmp_path: Path, monkeypatch) -> None:
         """OHLCV バックフィル失敗時に main が 1 を返す。"""

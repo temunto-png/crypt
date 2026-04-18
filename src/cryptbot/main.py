@@ -22,12 +22,20 @@ logger = logging.getLogger(__name__)
 
 
 # 戦略名 → クラスのマッピング（eval / 動的 import を使わない）
-def _resolve_strategy(name: str):
-    """戦略名から BaseStrategy インスタンスを返す。"""
+def _resolve_strategy(name: str, threshold: float = 2.0):
+    """戦略名と設定パラメータから BaseStrategy インスタンスを返す。
+
+    Args:
+        name: 戦略名（"ma_cross", "momentum", "mean_reversion", "volatility_filter"）
+        threshold: MomentumStrategy の閾値（name が "momentum" の場合のみ使用）
+    """
     from cryptbot.strategies.ma_cross import MACrossStrategy
     from cryptbot.strategies.momentum import MomentumStrategy
     from cryptbot.strategies.mean_reversion import MeanReversionStrategy
     from cryptbot.strategies.volatility_filter import VolatilityFilterStrategy
+
+    if name == "momentum":
+        return MomentumStrategy(threshold=threshold)
 
     _STRATEGIES = {
         "ma_cross": MACrossStrategy,
@@ -176,7 +184,7 @@ def _run_paper(args: argparse.Namespace) -> int:
         cvar_settings=settings.cvar,
         kill_switch=kill_switch,
     )
-    strategy = _resolve_strategy(settings.paper.strategy_name)
+    strategy = _resolve_strategy(settings.paper.strategy_name, threshold=settings.paper.momentum_threshold)
 
     ml_result = _build_ml_components(settings)
     if ml_result is None:
@@ -279,7 +287,7 @@ def _run_backtest(args: argparse.Namespace) -> int:
         cvar_settings=settings.cvar,
         kill_switch=kill_switch,
     )
-    strategy = _resolve_strategy(settings.paper.strategy_name)
+    strategy = _resolve_strategy(settings.paper.strategy_name, threshold=settings.paper.momentum_threshold)
 
     engine = BacktestEngine(
         strategy=strategy,
@@ -415,7 +423,7 @@ def _run_live(args: argparse.Namespace) -> int:
         cvar_settings=settings.cvar,
         kill_switch=kill_switch,
     )
-    strategy = _resolve_strategy(settings.live.strategy_name)
+    strategy = _resolve_strategy(settings.live.strategy_name, threshold=settings.live.momentum_threshold)
 
     ml_result = _build_ml_components(settings)
     if ml_result is None:
