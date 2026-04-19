@@ -39,7 +39,7 @@ def _make_ohlcv_and_store(tmp_path: Path, rows: int = 55) -> tuple[Path, Path]:
         "volume": [1.0] * rows,
     })
     df = normalize(df)
-    storage.save_ohlcv(df, pair="btc_jpy", timeframe="1hour", year=2024)
+    storage.save_ohlcv(df, pair="btc_jpy", timeframe="15min", year=2024)
 
     return db_path, data_dir
 
@@ -350,6 +350,23 @@ class TestBuildMlComponents:
         )
         result = _build_ml_components(settings)
         assert result is None
+
+
+def test_resolve_strategy_uses_momentum_threshold():
+    """_resolve_strategy が threshold を戦略に渡すことを確認。"""
+    from cryptbot.main import _resolve_strategy
+    from cryptbot.strategies.momentum import MomentumStrategy
+    strategy = _resolve_strategy("momentum", threshold=3.0)
+    assert isinstance(strategy, MomentumStrategy)
+    assert strategy.threshold == 3.0
+
+
+def test_resolve_strategy_default_threshold():
+    from cryptbot.main import _resolve_strategy
+    from cryptbot.strategies.momentum import MomentumStrategy
+    strategy = _resolve_strategy("momentum")
+    assert isinstance(strategy, MomentumStrategy)
+    assert strategy.threshold == 2.0
 
 
 class TestOhlcvBackfill:

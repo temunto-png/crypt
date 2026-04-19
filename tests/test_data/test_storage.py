@@ -337,10 +337,19 @@ class TestAuditLog:
 
         assert storage.verify_audit_chain() is False
 
-    def test_unknown_field_raises(self, storage: Storage) -> None:
-        """未知フィールドで ValueError が発生する。"""
-        with pytest.raises(ValueError, match="未知のフィールド"):
-            storage.insert_audit_log("signal", unknown_field="x")
+    def test_unknown_field_stored_in_details(self, storage: Storage) -> None:
+        """未知フィールドは details カラムに JSON でまとめて保存される。"""
+        import json, sqlite3
+        storage.insert_audit_log("signal", unknown_field="x", another="y")
+        conn = sqlite3.connect(storage._db_path)
+        row = conn.execute(
+            "SELECT details FROM audit_log WHERE event_type='signal' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        details = json.loads(row[0])
+        assert details.get("unknown_field") == "x"
+        assert details.get("another") == "y"
 
     def test_genesis_hash_on_first_insert(self, storage: Storage) -> None:
         """初回レコードの prev_hash が GENESIS を起点に計算される。"""

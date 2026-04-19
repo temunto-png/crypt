@@ -105,6 +105,7 @@ class LiveEngine:
         self._storage = storage
         self._executor = executor
         self._settings = settings
+        self._momentum_window: int = settings.momentum_window
         self._regime_detector = regime_detector
         self._ml_model = ml_model
         self._degradation_detector = degradation_detector
@@ -642,7 +643,9 @@ class LiveEngine:
         return True
 
     def _load_ohlcv(self) -> pd.DataFrame | None:
-        """ウォームアップ込みの OHLCV データを Storage から取得する。"""
+        """ウォームアップ込みの OHLCV データを Storage から取得し、特徴量を付与する。"""
+        from cryptbot.data.normalizer import normalize
+
         needed = self._settings.warmup_bars + 1
         try:
             data = self._storage.load_ohlcv(
@@ -656,7 +659,10 @@ class LiveEngine:
                     "live engine: OHLCV データ不足 (%d/%d 本)", len(data), needed
                 )
                 return None
-            return data.tail(needed).reset_index(drop=True)
+            data = data.tail(needed).reset_index(drop=True)
+            # 特徴量生成（normalize しないと strategy が HOLD 固定になる）
+            data = normalize(data, momentum_window=self._momentum_window)
+            return data
         except Exception:
             logger.exception("live engine: OHLCV データの読み込みに失敗")
             return None

@@ -172,3 +172,37 @@ class TestBacktestSettings:
         """
         bt = BacktestSettings(test_set_evaluated=True)
         assert bt.test_set_evaluated is True
+
+
+class TestPaperSettingsMomentum:
+    def test_paper_settings_momentum_defaults(self) -> None:
+        from cryptbot.config.settings import PaperSettings
+        s = PaperSettings()
+        assert s.momentum_threshold == 3.0
+        assert s.momentum_window == 20
+        assert s.timeframe == "15min"
+
+    def test_paper_settings_momentum_configurable(self) -> None:
+        from cryptbot.config.settings import PaperSettings
+        s = PaperSettings(momentum_threshold=2.5, momentum_window=10)
+        assert s.momentum_threshold == 2.5
+        assert s.momentum_window == 10
+
+    def test_paper_settings_momentum_threshold_must_be_positive(self) -> None:
+        from cryptbot.config.settings import PaperSettings
+        with pytest.raises(Exception):
+            PaperSettings(momentum_threshold=0.0)
+
+    def test_paper_settings_momentum_window_must_be_positive(self) -> None:
+        from cryptbot.config.settings import PaperSettings
+        with pytest.raises(Exception):
+            PaperSettings(momentum_window=0)
+
+
+class TestLiveSettingsMomentum:
+    def test_live_settings_momentum_defaults(self) -> None:
+        from cryptbot.config.settings import LiveSettings
+        s = LiveSettings()
+        assert s.momentum_threshold == 3.0
+        assert s.momentum_window == 20
+        assert s.timeframe == "15min"
