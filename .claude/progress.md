@@ -2,362 +2,162 @@
 
 ## 現在のフェーズ
 
-**Important A/B 修正完了・master マージ待ち**
+**Plan A（Paper Trade 前必須修正）完了（2026-04-19）**
 
-- テスト数: **659 passed**
-- ブランチ: `feat/startup-recovery-hardening`（base = `53a3a51`）— Important A/B 修正済み
-- メモリ: プロジェクト内 Read/Edit/Write は承認不要に設定済み（2026-04-16）
-
-## claude-mem 導入状況（2026-04-17）
-
-### Phase 0: 完了
-
-| 項目 | 状態 |
-|---|---|
-| Bun v1.3.12 | winget でインストール済み |
-| claude-mem v12.1.6 | npx 経由でプラグインインストール済み |
-| `WORKER_HOST` | `127.0.0.1` 確認済み |
-| `PROVIDER` | `claude` のみ |
-| `EXCLUDED_PROJECTS` | NEM Wallet / NanoWallet / ai-diagnosis-platform / Kink Vision（settings.json + PowerShell profile） |
-| `CHROMA_ENABLED` | `false`（初期 PoC は SQLite のみ） |
-| `MODE` | `code--ja` |
-| hooks.json | Setup / SessionStart / UserPromptSubmit / PostToolUse(*) / PreToolUse(Read) / Stop / SessionEnd |
-| rollback バックアップ | `~/.claude/settings.json.backup-before-claude-mem-2026-04-17` |
-
-### Phase 1: セキュリティテスト結果（2026-04-17）
-
-| テスト | 結果 | 備考 |
-|---|---|---|
-| SL-01: DB secret スキャン | **PASS** | sk-/ghp_/api_key/password パターン検出なし |
-| SL-02: tool output secret 保存確認 | **PASS** | ダミー secret（sk-test-AAA/mysecret）は narrative/text/facts に保存されず。LLM要約のみ保存 |
-| SL-03: 個別 observation 削除 | **PASS** | `DELETE FROM observations WHERE id=X` で削除・確認できた |
-| MP-01: 誤情報注入テスト | **PASS** | FTS 検索で id=6 の Binance 誤情報を正しく検出（2026-04-18） |
-| MP-03: 有害 memory 削除 | **PASS** | id=6 を DELETE 後、SELECT 空返却確認（2026-04-18） |
-
-### 重要メモ: uv インストール済み・vector search 未解決
-
-- uv 0.11.7 を `~/.local/bin` にインストール済み（2026-04-17）
-- worker 再起動済みだが "Vector search failed" のまま
-- `smart-install.js` が `~/.local/bin` の uv を検索するコードを確認済み
-- **原因推定**: worker プロセスの PATH に `~/.local/bin` が含まれていない。次の Claude Code セッション起動時に SessionStart hook 経由で `smart-install.js` が自動検出する可能性がある
-
-**次セッションで対応:**
-1. Claude Code を完全再起動 → SessionStart hook で smart-install.js が uv を自動検出するか確認
-2. 解決しない場合: claude-mem settings.json に `CLAUDE_MEM_UV_PATH` 等の設定項目があるか確認
-3. MP-01 誤情報（Binance, id=6）を search で検出・削除して MP-03 完了
-4. crypt Important A / B を修正して master マージ
-
-### Phase 1 残タスク
-
-- [x] uv インストール（v0.11.7、`~/.local/bin`）
-- [ ] Claude Code 完全再起動 → vector search 有効化確認（任意、FTS で代替確認済み）
-- [x] MP-01: 誤情報注入後の回答品質確認（FTS で PASS、2026-04-18）
-- [x] MP-03: 有害 memory 特定・削除確認（PASS、2026-04-18）
-- [x] `docs/claude_mem_security_tests.md` に結果を記入（2026-04-18）
-- [x] `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新（2026-04-18）
-
-### 作成済みドキュメント
-
-| ファイル | 内容 |
-|---|---|
-| `docs/claude_mem_rollout_checklist.md` | Phase 0〜2 チェックリスト（Phase 0 完了済み） |
-| `docs/claude_mem_repo_registry.md` | 対象/除外 repo・owner・削除責任者 |
-| `docs/claude_mem_karpathy_rules_proposal.md` | andrej-karpathy-skills 最小差分提案 |
-| `docs/claude_mem_golden_tasks.md` | memory on/off 比較用 5 タスク |
-| `docs/claude_mem_security_tests.md` | secret leakage / memory poisoning テスト手順 |
-| `docs/magika_poc_plan.md` | Magika PoC 計画 |
-| `docs/cognee_poc_plan.md` | cognee 比較 PoC 計画 |
-| `docs/open_agents_threat_model.md` | open-agents threat model |
-| `docs/claude_mem_rollback_and_deps.md` | rollback 手順 / dependency review |
-
-## リポジトリ
-
-- GitHub: https://github.com/temunto-png/crypt.git（branch: master、HEAD = `566c065`）
-- ローカル: `C:\tool\claude\crypt`
-- 未追跡（意図的）: `.claude/`、`claude_code_adversarial_review_handoff.md`、`codex_review_handoff.md`、`docs/superpowers/`
-- Codex 引き継ぎ書: `C:\tool\claude\crypt\codex_review_handoff.md`
-
-## 完了事項
-
-- [x] Phase 0〜3 + P2 adversarial review 全対応（pytest 477/477 passed）
-- [x] **Phase 4 Task A1〜A4**: LiveSettings / BaseExchange.get_order() / Storage 変更（SUBMIT_FAILED・exclusive_transaction・マイグレーション）
-- [x] **Phase 4 Task B**: BitbankPrivateExchange（HMAC-SHA256・monotonic nonce・retry nonce 再生成）+ テスト
-- [x] **Phase 4 Task C**: LiveExecutor（TOC/TOU-safe 二重発注防止・PARTIAL_FILLED ライフサイクル・sanitize_error）+ テスト
-- [x] **Phase 4 Task D**: LiveState + LiveStateStore + phase_4_gate + verify_api_permissions + テスト
-- [x] **Phase 4 Task E**: LiveEngine（asyncio 永続プロセス・バーループ・PARTIAL_FILLED ポーラー）+ テスト
-- [x] **Phase 4 Task F**: main.py `_run_live()` 実装（phase_4_gate・BitbankPrivateExchange・LiveEngine 統合）+ テスト更新
-
-## Phase 4 実装済みファイル
-
-| ファイル | 概要 |
-|---------|------|
-| `src/cryptbot/config/settings.py` | LiveSettings 追加 |
-| `src/cryptbot/exchanges/base.py` | get_order() abstractmethod 追加 |
-| `src/cryptbot/exchanges/bitbank.py` | get_order() stub 追加 |
-| `src/cryptbot/exchanges/gmo.py` | get_order() stub 追加 |
-| `src/cryptbot/exchanges/bitbank_private.py` | 新規: HMAC-SHA256 認証・place_order・cancel_order・get_order・get_assets |
-| `src/cryptbot/data/storage.py` | SUBMIT_FAILED ステータス・exclusive_transaction・get_active_orders・get_order_exchange_id・マイグレーション |
-| `src/cryptbot/execution/live_executor.py` | 新規: LiveExecutor（DuplicateOrderError・place_order・cancel_order・handle_partial_fill） |
-| `src/cryptbot/live/__init__.py` | 新規 |
-| `src/cryptbot/live/state.py` | 新規: LiveState dataclass + LiveStateStore |
-| `src/cryptbot/live/gate.py` | 新規: LiveGateError・phase_4_gate（4条件 fail-closed）・verify_api_permissions |
-| `src/cryptbot/live/engine.py` | 新規: LiveEngine（run_one_bar・run・_bar_loop・_partial_fill_loop） |
-| `src/cryptbot/main.py` | _run_live() 実装・LiveTradingNotImplementedError 除去・live ルーティング |
-| `tests/test_live/test_gate.py` | gate + verify_api_permissions テスト |
-| `tests/test_live/test_state.py` | LiveStateStore CRUD + 変換ヘルパーテスト |
-| `tests/test_live/test_engine.py` | LiveEngine run_one_bar / partial fill / graceful shutdown テスト |
-| `tests/test_main/test_main.py` | live gate 失敗テスト更新（LiveTradingNotImplementedError → return 1） |
-
-## 次セッション引継ぎ（2026-04-17 時点）
-
-### 優先順
-
-#### 1. vector search 有効化（5分）
-
-Claude Code を完全再起動すると SessionStart hook の `smart-install.js` が `~/.local/bin/uv` を自動検出する可能性が高い。
-
-```bash
-# 再起動後に確認
-curl -sf http://localhost:37777/health
-# MCP ツールで /mem-search "Binance" を試す
-```
-
-依然失敗する場合 → `~/.claude-mem/settings.json` に `CLAUDE_MEM_UV_PATH` の設定項目があるか確認し、`C:/Users/temun/.local/bin/uv.exe` を明示指定する。
-
-#### 2. MP-01 / MP-03 完了（10分）
-
-vector search 不可の場合は FTS で代用：
-
-```bash
-# 誤情報（Binance, id=6）を検索・削除
-sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" \
-  "SELECT id, title FROM observations WHERE narrative LIKE '%Binance%';"
-sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "DELETE FROM observations WHERE id=6;"
-sqlite3 "C:/Users/temun/.claude-mem/claude-mem.db" "SELECT id FROM observations WHERE id=6;"
-# → 何も返らなければ PASS
-```
-
-完了後、`docs/claude_mem_security_tests.md` と `docs/claude_mem_rollout_checklist.md` Phase 1 チェックを更新する。
-
-#### 3. master マージ ← **次のアクション**
-
-Important A / B 修正後:
-```bash
-cd C:/tool/claude/crypt
-python -m pytest -q  # 657+ passed を確認
-git add src/cryptbot/live/engine.py src/cryptbot/execution/live_executor.py tests/...
-git commit -m "fix: TIMEOUT_CANCELLED LiveState update and empty order_id validation"
-git checkout master
-git merge feat/startup-recovery-hardening
-git push origin master
-```
+- テスト数: **678 passed**（元 666 + 新規 12）
+- worktree branch: `feat/plan-a-paper-trade-critical-fixes`（HEAD: `848ade2`、tag: `plan-a-complete`）
+- master HEAD: `86416ea`（Plan A は未マージ — master へのマージを次アクションとして実施予定）
 
 ---
+
+## 最新作業（2026-04-18）
+
+### 0. 2D グリッドサーチ（threshold × momentum_window）実行完了
+
+**KillSwitch isolation 修正済み**（`make_risk_manager()` L75 に `ks.reset()` 追加）  
+**2D グリッドサーチ実装済み**（`MOMENTUM_WINDOW_CANDIDATES = [3, 5, 10, 20]` × `THRESHOLD_CANDIDATES`）
+
+グリッドサーチ結果（32組み合わせ、正 score 抜粋）:
+
+| window | threshold | trades | pnl% | win% | Sharpe | score |
+|--------|-----------|--------|------|------|--------|-------|
+| **20** | **3.0** | **15** | **+1.51%** | **40.0%** | **0.08** | **0.038** ← 最良 |
+| 5 | 2.5 | 17 | +1.20% | 35.3% | 0.05 | 0.031 |
+| 3 | 3.0 | 6 | +2.05% | 16.7% | 0.09 | 0.018 |
+
+**最良パラメータ: threshold=3.0, momentum_window=20**
+
+WF 結果（threshold=3.0, momentum_window=20, 12窓）:
+
+| W | 検証期間 | 取引 | 損益% | 勝率 | Sharpe |
+|---|---------|------|-------|------|--------|
+| W01 | 2022-07〜11 | 16 | +3.31% | 43.8% | 0.48 |
+| W02 | 2022-11〜2023-03 | 9 | +3.12% | 44.4% | 0.53 |
+| W03 | 2023-03〜07 | 12 | +5.18% | 41.7% | 0.84 |
+| W04 | 2023-07〜11 | 4 | +0.40% | 25.0% | 0.14 |
+| W05 | 2023-11〜2024-03 | 11 | +11.18% | 27.3% | 1.64 |
+| W06 | 2024-03〜07 | 12 | -3.69% | 16.7% | -0.77 |
+| W07 | 2024-07〜11 | 10 | -2.74% | 30.0% | -0.55 |
+| W08 | 2024-11〜2025-03 | 11 | +2.29% | 36.4% | 0.50 |
+| W09 | 2025-03〜07 | 9 | +7.42% | 66.7% | 1.06 |
+| W10 | 2025-07〜11 | 3 | -2.18% | 0.0% | -2.47 |
+| W11 | 2025-11〜2026-03 | 10 | -6.17% | 10.0% | -1.63 |
+| W12 | 2026-03〜04 | 4 | +0.61% | 25.0% | 0.32 |
+
+**合計取引数: 111**（基準 30+ クリア）  
+**勝ち窓: 8/12**（前回 window=5 比: 82 trades → 111 trades、6/12 → 8/12）
+
+### 1. Walk-Forward KillSwitch 修正 → master マージ完了
+
+| ファイル | 変更 |
+|---------|------|
+| `src/cryptbot/risk/kill_switch.py` | `reset()` メソッド追加（インメモリのみ・audit_log 書き込みなし） |
+| `src/cryptbot/backtest/engine.py` | `run_walk_forward()` の学習窓前・検証窓前に `reset()` を追加 |
+| `tests/test_risk/test_risk.py` | `reset()` テスト 2 件追加 |
+| `tests/test_backtest/test_engine.py` | WF 窓間分離テスト 1 件追加 |
+
+**修正前の症状**: W02 以降が空結果（KillSwitch が学習窓で発動すると全後続窓をブロック）
+
+### 2. 15min バックフィル完了
+
+- 取得量: **150,528 bars** (2022-01-01 〜 2026-04-18)
+- 保存先: `data/btc_jpy/15min/2022〜2026.parquet`
+
+### 3. グリッドサーチ結果（旧: window=5 固定 → 2D グリッドに更新済み）
+
+旧結果（KillSwitch 汚染あり、window=5 固定）は Section 0 の新結果に置き換え。
+
+### 4. Walk-Forward 結果（現最良: threshold=3.0, window=20）
+
+Section 0 参照。
+
+---
+
+## Plan A 実装サマリー（2026-04-19）
+
+### 実装済みコミット（branch: feat/plan-a-paper-trade-critical-fixes）
+
+| コミット | 内容 |
+|---------|------|
+| `1326594` | feat(config): PaperSettings/LiveSettings に momentum_threshold/window 追加 |
+| `ff4162e` | feat(main): _resolve_strategy に threshold 引数を追加し settings から渡す |
+| `6e2c9bd` | fix(paper/live): OHLCV ロード後に normalize() を必ず適用する |
+| `1d3ce0a` | fix(fetch): Storage 初期化漏れ修正・--fetch-profile で paper/live 設定を選択可能に |
+| `a3e119f` | fix(main): settings.kill_switch.active を起動時に KillSwitch へ反映する + startup_config audit_log 記録 |
+| `848ade2` | docs(config): paper セクションに WF採用パラメータを追記 |
+
+### Plan A 完了基準チェック
+
+- [x] `pytest -q` が全テスト PASS（678 passed）
+- [x] `--mode paper` で `audit_log` に `signal` イベントが記録される
+- [x] `--mode paper` で threshold=3.0, window=20 の strategy が使われる
+- [x] `--mode fetch-ohlcv --fetch-profile paper` が `paper.timeframe=15min` でデータ取得
+- [x] `--mode fetch-ohlcv` を新規 DB に対して実行してもエラーにならない
+- [x] `config.yaml` で `kill_switch.active: true` 設定時に KillSwitch が即発動
+- [x] `audit_log` に `startup_config` イベントが戦略名・閾値・window 付きで記録される
 
 ## 次のアクション
 
-1. ~~**P2 実装を開始**~~（完了）
-2. ~~Codex ソースレビュー対応~~（完了 — F1〜F7 全対応済み）
-3. ~~**OHLCV 自動投入**~~（完了 — OhlcvUpdater 実装・LiveEngine 注入・バックフィル追加）
-4. ~~**P2（F4/F5/F6）実装**~~（完了 — commit d85de98・テスト 601 passed）
-5. ~~**詳細敵対的レビュー対応（NF1〜NF7）**~~（完了 — commit 未 push）
-6. ~~**ポジション同期（リカバリー）実装**~~（完了 — 638 passed）
-7. ~~**起動リカバリー堅牢化（P1/P2/P3）**~~ — 8/8 タスク完了、残2件対応後 master マージ
-8. ~~**【次セッション】残 Important 2件を修正して master にマージ**~~ — Important A/B 修正済み（659 passed、2026-04-18）
-9. **【次セッション】master マージ → 本番起動準備**
+1. **【必須】Plan A を master へマージ**
+   - `git checkout master && git merge --no-ff feat/plan-a-paper-trade-critical-fixes`
+   - または PR 経由でマージ
 
-### 修正済み Important 2件（2026-04-18）
+2. **【次フェーズ】Plan B: Paper Trade 運用タスク**
+   - Paper trade 起動（`--mode paper`）
+   - 2週間モニタリング → Live 移行判断
 
-#### A: `TIMEOUT_CANCELLED` で LiveState が更新されない — ✅ 修正済み
-- `src/cryptbot/live/engine.py` の `_poll_active_orders()` に `TIMEOUT_CANCELLED + executed_amount > 0` ブランチを追加
-- テスト 2 件追加（BUY 部分約定あり / executed_amount=0 で変化なし）
-
-#### B: `exchange_order_id` 空文字列が検証をすり抜ける — ✅ 修正済み
-- `src/cryptbot/execution/live_executor.py` の order_id 検証を強化
-- `""` / `"0"` → SUBMIT_FAILED、非数値文字列（"EX-001" 等）は許容
-- テスト 2 件追加（`""` / `"0"` → SUBMIT_FAILED）
+3. **【任意】直近弱さの分析**
+   - W10〜W11（2025-07〜2026-03）4連敗中
+   - 市場レジーム変化（volatility 低下など）の可能性あり
 
 ---
 
-## 詳細敵対的レビュー 対応計画（2026-04-16）
+## リポジトリ
 
-引継ぎ書: `claude_code_detailed_adversarial_review_handoff.md`
-テスト基準: 601 passed を維持しつつ追加テストを通過させる
+- GitHub: https://github.com/temunto-png/crypt.git（branch: master）
+- ローカル: `C:\tool\claude\crypt`
+- 未追跡（意図的）: `.claude/`、`docs/superpowers/`
 
-### 未対応 P1（運用前にブロッカー）
+---
 
-| ID | 内容 | 主要ファイル |
-|----|------|------------|
-| NF1 | 約定結果が LiveState に反映されない — `handle_partial_fill()` が `FULLY_FILLED` 検出時に `balance`/`position_size`/`entry_price` を更新しない | `execution/live_executor.py:193-216`, `live/engine.py:374-385` |
-| NF2 | 起動時に BTC 残高があるとき fail-closed にならない — 現状は警告のみ、`adopt_existing_position` 設定なしに継続する | `live/engine.py:573-591` |
-| NF3 | `place_order()` 成功後の `order_submitted` 監査ログ失敗を握り潰す — 取引所に注文が存在するのに証跡が欠落 | `live/engine.py:430-458` |
+## クオンツ分析サマリー（2026-04-18）
 
-### 未対応 P2（運用品質改善）
+| 項目 | 1hour 足 | 15min 足 |
+|------|----------|----------|
+| 戦略 | MomentumStrategy(threshold=3.0) | MomentumStrategy(threshold=3.0, window=20) |
+| momentum window | pct_change(5) | pct_change(20) |
+| データ量 | 37,632 bars | 150,528 bars |
+| バックテスト全期間取引数 | 13 trades | 15 trades |
+| WF 合計取引数 | 13 trades | **111 trades** ← 基準クリア |
+| WF 勝ち窓 | — | **8/12** |
+| 本番基準 30+ 達成 | ✗ | ✓ |
 
-| ID | 内容 | 主要ファイル |
-|----|------|------------|
-| NF4 | `PARTIALLY_FILLED`/`CANCELED_UNFILLED`/`CANCELED_PARTIALLY_FILLED` をDB/LiveState に反映しない | `execution/live_executor.py:193-222` |
-| NF5 | `load_ohlcv(verify=True)` が `verify_ohlcv_integrity()` を呼ばず、ハッシュ改ざんを検出できない | `data/storage.py:550-560`, `live/engine.py:463-468` |
-| NF6 | `_bar_loop()` が `update_latest()` の失敗を見ておらず、stale data で取引を継続する | `live/engine.py:352-356`, `data/ohlcv_updater.py:52-69` |
-| NF7 | ML劣化検知 baseline に `accuracy` を使っている（`mean_confidence` を使うべき） | `main.py:102-127` |
+---
 
-### 実装方針
+## 主要な設計判断
 
-**NF1**: `handle_partial_fill()` を `OrderSyncResult(side, status, executed_amount, average_price, terminal)` を返すように変更。`LiveEngine` 側で BUY/SELL ごとに `PortfolioState` と `LiveStateStore` を更新する。LiveState 更新失敗は fail-closed。
+| 項目 | 決定 |
+|------|------|
+| 取引所 | bitbank（APIドキュメント品質・OHLCV API充実） |
+| 銘柄 | BTC/JPY 現物（Long-only） |
+| 時間足 | 15min（1hour から変更、取引頻度改善のため） |
+| コスト | Taker 0.1% + スリッページ 0.05% = 0.15% |
+| データ保存 | SQLite + Parquet |
+| 設定 | YAML + pydantic |
+| ログ | loguru (JSON Lines) + SQLite audit_log |
+| asyncio 永続プロセス | asyncio.run(engine.run()) |
+| 二重発注防止 | BEGIN EXCLUSIVE + CREATED チェック |
 
-**NF2**: `_sync_initial_balance()` に BTC 残高チェックを追加。`btc >= min_order_size_btc` の場合は `LiveGateError` で停止。既存 LiveState あり時も `position_size` と実 BTC 残高を許容差で照合。
+---
 
-**NF3**: `_submit_pending()` の `try` ブロックを分割。`place_order()` 成功後に監査ログブロックを独立させ、失敗時は `LiveGateError` または kill switch。
+## claude-mem 導入状況（2026-04-18 時点）
 
-**NF4**: `handle_partial_fill()` 内の bitbank ステータス処理を全列挙。`PARTIALLY_FILLED` → DB PARTIAL + 累積 amount 更新、`CANCELED_*` → DB 終端遷移 + 部分約定分を LiveState 反映。
+Phase 0〜1 完了。vector search 有効化済み（ChromaDB）。
 
-**NF5**: `load_ohlcv(verify=True)` のループ内で `verify_ohlcv_integrity(pair, timeframe, year)` を呼び出す。live 用途では integrity NG を skip 扱いにせず fail-closed。
-
-**NF6**: `_bar_loop()` で `update_latest()` の戻り値を確認し、`False` の場合は `run_one_bar()` をスキップ。連続失敗カウンタを追加し、閾値超過で kill switch。
-
-**NF7**: `_build_ml_components()` の `baseline_confidence` を `ExperimentRecord.metrics["mean_confidence"]` から取得。欠落時は fail-closed（return 1）またはフォールバックログ。
-
-### 実装チェックリスト
-
-#### NF1 — 約定 LiveState 反映 ✅ 完了（commits: ffb115f, b9267d0）
-- [x] `OrderSyncResult` dataclass を `execution/live_executor.py` に追加
-- [x] `handle_partial_fill()` を `OrderSyncResult` 返却形式に変更（FULLY_FILLED / TIMEOUT_CANCELLED / WAITING）
-- [x] `LiveEngine._poll_active_orders()` で `OrderSyncResult` を受け取り LiveState 更新
-- [x] LiveState 更新失敗時の fail-closed 追加（`LiveGateError`）
-- [x] BUY 約定後: `position_size`, `entry_price`, `position_entry_price`, `position_entry_time` 更新
-- [x] SELL 約定後: `position_size=0`, `entry_price=0`, `position_entry_time=None`
-- [x] テスト 6 件追加（FULLY_FILLED/WAITING/TIMEOUT_CANCELLED + LiveState 反映 3 件）
-
-#### NF2 — 起動時 BTC 残高 fail-closed ✅ 完了（commit: 654be13）
-- [x] `_sync_initial_balance()` 初回起動: BTC ≥ `min_order_size_btc` で `LiveGateError`（警告 → fail-closed）
-- [x] 再起動: LiveState ノーポジ + 実 BTC あり → `LiveGateError`
-- [x] 再起動: LiveState ポジあり + 実 BTC < min → `LiveGateError`
-- [x] 再起動: BTC と `position_size` 乖離 > `balance_sync_tolerance_pct` → `LiveGateError`
-- [x] テスト 4 件追加（`TestSyncInitialBalance` クラスに追加、611 passed）
-
-#### NF3 — order_submitted 監査ログ fail-closed ✅ 完了（commit 未 push）
-- [x] `_submit_pending()` の try ブロックを `place_order()` と監査ログで分割
-- [x] 監査ログ失敗時は `LiveGateError` raise（fail-closed）
-- [x] テスト 3 件追加（audit_log 失敗→LiveGateError / 両成功→True / place_order 失敗→False & audit 未呼び出し）
-
-#### NF4 — キャンセル/部分約定 DB 反映 ✅ 完了
-- [x] `handle_partial_fill()` に `PARTIALLY_FILLED`/`CANCELED_UNFILLED`/`CANCELED_PARTIALLY_FILLED` 分岐追加
-- [x] `CANCELED_PARTIALLY_FILLED` で LiveEngine が LiveState を部分約定分で更新
-- [x] テスト 6 件追加（executor 3 件 + engine 3 件）
-
-#### NF5 — OHLCV ハッシュ検証 ✅ 完了
-- [x] `load_ohlcv(verify=True)` のループ内で `verify_ohlcv_integrity()` を呼ぶ
-- [x] `fail_closed: bool = False` 引数追加。live 経路（`_load_ohlcv()`）は `fail_closed=True` で呼出し
-- [x] テスト 4 件追加（ハッシュ一致・不一致×fail_closed・未計算×fail_closed）
-
-#### NF6 — OHLCV 更新失敗後の取引停止 ✅ 完了
-- [x] `_bar_loop()` で `update_latest()` 戻り値を確認し、`False` で `run_one_bar()` スキップ
-- [x] `_MAX_CONSECUTIVE_UPDATE_FAILURES = 3`、超過で `LiveGateError` raise
-- [x] テスト 3 件追加（False→スキップ / True→呼出し / 連続3回→LiveGateError）
-
-#### NF7 — ML baseline を mean_confidence に修正 ✅ 完了
-- [x] `_build_ml_components()` の `baseline_confidence` を `metrics["mean_confidence"]` に変更
-- [x] `mean_confidence` 欠落時は fail-closed（return None）
-- [x] テスト 4 件追加
-
-#### 完了条件
-- [x] `python -m pytest -q` が PASS（631 passed）
-- [ ] 各 fail-closed ケースで「停止すべき状態」と「継続してよい状態」が明確
-- [ ] 復旧手順がログで追えること
-
-## P2（F4/F5/F6）設計メモ（2026-04-16）
-
-### 確定した設計方針
-
-| Finding | 内容 | 方針 |
-|---------|------|------|
-| F4 | ML設定が live/paper の実行経路に未接続 | `_build_ml_components()` ヘルパーを `main.py` に追加。enabled=true でモデル未検出は fail-closed（return 1）。live + paper 両方に接続 |
-| F5 | MLフィルタが特徴量空・例外時に fail-open | `apply_ml_filter()` に `fail_closed: bool = False` 引数追加。live/paper は `True`、backtest は `False`（デフォルト維持） |
-| F6 | OHLCV整合性チェックが live 読み込み時に未使用 | `load_ohlcv()` に `verify: bool = False` 引数追加。live の `_load_ohlcv()` は `verify=True`。検証失敗ファイルはスキップ（バースキップ） |
-
-### 変更ファイルリスト
-
-| ファイル | Finding | 変更内容 |
-|---------|---------|---------|
-| `src/cryptbot/backtest/engine.py` | F5 | `apply_ml_filter()` に `fail_closed` 引数追加 |
-| `src/cryptbot/live/engine.py` | F5, F6 | `apply_ml_filter()` 呼び出しに `fail_closed=True`、`_load_ohlcv()` に `verify=True` |
-| `src/cryptbot/paper/engine.py` | F5 | `apply_ml_filter()` 呼び出しに `fail_closed=True` |
-| `src/cryptbot/data/storage.py` | F6 | `load_ohlcv()` に `verify` 引数追加・ファイル単位の整合性検証ループ |
-| `src/cryptbot/main.py` | F4 | `_build_ml_components()` 追加、`_run_paper()` / `_run_live()` に ML 組み立て接続 |
-
-### 追加テスト
-
-| テストファイル | クラス | 件数 |
-|-------------|--------|------|
-| `tests/test_backtest/test_engine.py` | `TestApplyMlFilter` | 4件 |
-| `tests/test_data/test_storage.py` | `TestLoadOhlcvVerify` | 5件 |
-| `tests/test_main/test_main.py` | `TestBuildMlComponents` | 4件 |
-
-### 実装フェーズ（チェックリスト）
-
-- [x] **F5-1**: `backtest/engine.py` — `apply_ml_filter()` に `fail_closed` 引数追加
-- [x] **F5-2**: `live/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
-- [x] **F5-3**: `paper/engine.py` — `apply_ml_filter()` 呼び出しに `fail_closed=True`
-- [x] **F5-4**: `tests/test_backtest/test_engine.py` — `TestApplyMlFilter` 4件追加
-- [x] **F6-1**: `data/storage.py` — `load_ohlcv()` に `verify` 引数追加
-- [x] **F6-2**: `live/engine.py` — `_load_ohlcv()` に `verify=True`
-- [x] **F6-3**: `tests/test_data/test_storage.py` — `TestLoadOhlcvVerify` 5件追加
-- [x] **F4-1**: `main.py` — `_build_ml_components()` 追加・`_run_paper()` 接続
-- [x] **F4-2**: `main.py` — `_run_live()` 接続
-- [x] **F4-3**: `tests/test_main/test_main.py` — `TestBuildMlComponents` 4件追加
-- [x] **確認**: `pytest -q` 全通過（601 passed）
-
-## P1 バグ修正 完了（master マージ済み、2026-04-16）
-
-ベース SHA `e20a7f6` → HEAD `8dd2986`
-
-| Finding | 内容 | ファイル |
-|---------|------|---------|
-| F1 | `_poll_active_orders()` — SUBMITTED+PARTIAL を照合対象に | `live/engine.py` |
-| F2 | `_sync_initial_balance()` — 起動時に取引所残高を同期、peak_balance 更新 | `live/engine.py`, `main.py`, `live/state.py` |
-| F3 | `_submit_pending()` — BUY=リスク連動サイズ、SELL=ポジションサイズ | `live/engine.py` |
-| F7 | `_record_signal()` — BUY のみ fail-closed | `live/engine.py` |
-
-## Phase 4 主要な設計判断
-
-| 項目 | 決定 | 理由 |
-|------|------|------|
-| asyncio 永続プロセス | asyncio.run(engine.run()) | cron より状態管理が容易・PARTIAL ポーリングに適合 |
-| 二重発注防止 | BEGIN EXCLUSIVE + CREATED チェック | TOC/TOU 競合を SQLite レベルで防止 |
-| bitbank POST 署名 | nonce + body（パスなし） | bitbank 仕様: GET は nonce+path、POST は nonce+body |
-| nonce 再生成 | retry ループ内で毎回 _auth_headers() | 失効 nonce での再試行を防止 |
-| PARTIAL タイムアウト | order_timeout_sec (default 7200s) | 30分ポーリング × 最大 4 回 = 2 時間後キャンセル |
-| LiveState 初期残高 | 0 で初期化（_init_fresh_state） | 実際の残高は起動時に exchange から取得する想定 |
-| テスト残高シード | _seed_state(state_store) | monthly_limit=0 による circuit breaker 即時発動を防止 |
-
-## Phase 4 テスト状況（560 passed、全 Task 完了）
-
-- `tests/test_execution/test_live_executor.py`: LiveExecutor テスト
-- `tests/test_live/test_gate.py`: phase_4_gate / verify_api_permissions (28件)
-- `tests/test_live/test_state.py`: LiveStateStore (28件)
-- `tests/test_live/test_engine.py`: LiveEngine (17件)
-
-## 過去の完了事項（Phase 0〜3）
-
-### Phase 3 実装完了（pytest 477/477 passed）
-- ML モデル（LightGBM / XGBoost）+ 劣化検知 + 実験管理
-- PaperEngine に ML フィルター統合
-
-### Phase 2 実装完了（pytest 417/417 passed）
-- PaperSimulator / PaperExecutor / LiveExecutor スケルトン
-
-### Phase 1 実装完了（pytest 288/288 passed）
-- KillSwitch / RiskManager / CVaR / RegimeDetector / audit_log / order state machine
-
-### Phase 0 実装完了（pytest 33/33 passed）
-- 設定 / ロガー / 時刻ユーティリティ / 基盤
-
-## 主要な設計判断（要約）
-
-- 取引所: **bitbank**（APIドキュメント品質、OHLCV API充実）
-- 銘柄: BTC/JPY 現物（Long-only）
-- 時間足: 1hour
-- コスト想定: Taker 0.1% + スリッページ 0.05% = 0.15%
-- データ保存: SQLite + Parquet
-- 設定: YAML + pydantic
-- ログ: loguru (JSON Lines) + SQLite audit_log
+| テスト | 結果 |
+|-------|------|
+| SL-01: DB secret スキャン | PASS |
+| SL-02: tool output secret 保存確認 | PASS |
+| SL-03: 個別 observation 削除 | PASS |
+| MP-01: 誤情報注入テスト | PASS |
+| MP-03: 有害 memory 削除 | PASS |
