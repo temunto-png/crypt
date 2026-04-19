@@ -7,6 +7,16 @@
 # --confirm-live CLI フラグの両方が必要（二段階ゲート）
 mode: paper
 
+# Paper Trade 設定（WF採用パラメータ）
+paper:
+  initial_balance: 1000000.0     # 初期資金 100万JPY
+  pair: btc_jpy
+  timeframe: "15min"             # WF採用時間足
+  warmup_bars: 50
+  strategy_name: momentum        # WF採用戦略
+  momentum_threshold: 3.0        # WF採用閾値（threshold=3.0, window=20 が最良）
+  momentum_window: 20            # WF採用 momentum_window
+
 # Circuit Breaker 設定（動的計算の基準率）
 # 実際の損失閾値は cycle 開始時の現在残高 × 各 pct で計算される
 circuit_breaker:
