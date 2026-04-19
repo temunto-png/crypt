@@ -18,6 +18,9 @@ import logging
 import sys
 from pathlib import Path
 
+from cryptbot.config.settings import load_settings
+from cryptbot.data.ohlcv_updater import OhlcvUpdater
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +88,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         dest="backfill_years",
         help="fetch-ohlcv モード: 取得する年数（省略時は設定値を使用）",
+    )
+    parser.add_argument(
+        "--fetch-profile",
+        choices=["paper", "live"],
+        default="paper",
+        dest="fetch_profile",
+        help="fetch-ohlcv で使う pair/timeframe の設定プロファイル（デフォルト: paper）",
     )
     return parser
 
@@ -162,7 +172,6 @@ def _build_ml_components(settings):
 
 def _run_paper(args: argparse.Namespace) -> int:
     """paper モードで 1 バー処理する。"""
-    from cryptbot.config.settings import load_settings
     from cryptbot.data.storage import Storage
     from cryptbot.paper.engine import PaperEngine
     from cryptbot.paper.state import PaperStateStore
@@ -261,7 +270,6 @@ def _run_backtest(args: argparse.Namespace) -> int:
     )
     from cryptbot.backtest.engine import BacktestEngine
     from cryptbot.backtest.metrics import calculate_metrics
-    from cryptbot.config.settings import load_settings
     from cryptbot.data.normalizer import normalize
     from cryptbot.data.storage import Storage
     from cryptbot.risk.kill_switch import KillSwitch
@@ -341,9 +349,7 @@ def _run_backtest(args: argparse.Namespace) -> int:
 
 def _run_fetch_ohlcv(args: argparse.Namespace) -> int:
     """OHLCV データをバックフィルして終了する（認証不要）。"""
-    from cryptbot.config.settings import load_settings
     from cryptbot.data.fetcher import DataFetcher
-    from cryptbot.data.ohlcv_updater import OhlcvUpdater
     from cryptbot.data.storage import Storage
     from cryptbot.exchanges.bitbank import BitbankExchange
 
@@ -351,36 +357,49 @@ def _run_fetch_ohlcv(args: argparse.Namespace) -> int:
 
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    storage = Storage(db_path=Path(args.db), data_dir=data_dir)
+    db_path = Path(args.db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    storage = Storage(db_path=db_path, data_dir=data_dir)
+    # 新規環境でも失敗しないよう必ず初期化する
+    storage.initialize()
+
+    # --fetch-profile で paper/live どちらの設定を使うかを選ぶ
+    fetch_profile = getattr(args, "fetch_profile", "paper")
+    if fetch_profile == "live":
+        pair = settings.live.pair
+        timeframe = settings.live.timeframe
+        default_backfill_years = settings.live.ohlcv_backfill_years
+    else:
+        pair = settings.paper.pair
+        timeframe = settings.paper.timeframe
+        default_backfill_years = settings.live.ohlcv_backfill_years
+
+    backfill_years = args.backfill_years or default_backfill_years
+
+    print(
+        f"[INFO] fetch-ohlcv 開始: profile={fetch_profile}"
+        f" pair={pair} timeframe={timeframe} backfill_years={backfill_years}"
+    )
 
     pub_exchange = BitbankExchange()
     fetcher = DataFetcher(exchange=pub_exchange, storage=storage)
-    backfill_years = args.backfill_years or settings.live.ohlcv_backfill_years
     updater = OhlcvUpdater(
         fetcher=fetcher,
-        pair=settings.live.pair,
-        timeframe=settings.live.timeframe,
+        pair=pair,
+        timeframe=timeframe,
         backfill_years=backfill_years,
     )
 
     async def _fetch() -> int:
         return await updater.backfill()
 
-    try:
-        n = asyncio.run(_fetch())
-        print(
-            f"[INFO] OHLCV バックフィル完了: {n} 本  "
-            f"pair={settings.live.pair}  tf={settings.live.timeframe}"
-        )
-        return 0
-    except Exception as exc:
-        print(f"[ERROR] OHLCV バックフィル失敗: {exc}", file=sys.stderr)
-        return 1
+    count = asyncio.run(_fetch())
+    print(f"[INFO] fetch-ohlcv 完了: {count} 件保存")
+    return 0
 
 
 def _run_live(args: argparse.Namespace) -> int:
     """live モードで asyncio 永続プロセスとして動作する。"""
-    from cryptbot.config.settings import load_settings
     from cryptbot.data.storage import Storage
     from cryptbot.exchanges.bitbank_private import BitbankPrivateExchange
     from cryptbot.execution.live_executor import LiveExecutor

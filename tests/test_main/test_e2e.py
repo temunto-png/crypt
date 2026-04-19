@@ -67,8 +67,8 @@ def test_paper_normalizes_ohlcv_for_momentum(tmp_env, monkeypatch):
         )
     )
 
-    # load_settings を mock（_run_paper 内で from cryptbot.config.settings import load_settings している）
-    monkeypatch.setattr("cryptbot.config.settings.load_settings", lambda: mock_settings)
+    # load_settings を mock（cryptbot.main モジュールレベルでインポートしているため main.load_settings をパッチ）
+    monkeypatch.setattr("cryptbot.main.load_settings", lambda: mock_settings)
 
     args = argparse.Namespace(
         db=str(tmp_env["db"]),
@@ -90,3 +90,65 @@ def test_paper_normalizes_ohlcv_for_momentum(tmp_env, monkeypatch):
         "normalize() が適用されず momentum カラムが存在しないため、strategy が常に HOLD を返している。"
         f"記録された direction: {directions}"
     )
+
+
+def test_fetch_ohlcv_initializes_storage_on_fresh_db(tmp_env, monkeypatch):
+    """新規 DB で fetch-ohlcv を実行しても初期化エラーが出ないことを確認。"""
+    import argparse
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from cryptbot.config.settings import Settings, PaperSettings, LiveSettings
+    import cryptbot.main as main_mod
+
+    mock_settings = Settings(
+        paper=PaperSettings(pair="btc_jpy", timeframe="15min", momentum_window=20),
+        live=LiveSettings(pair="btc_jpy", timeframe="15min", ohlcv_backfill_years=1),
+    )
+    monkeypatch.setattr(main_mod, "load_settings", lambda: mock_settings)
+
+    mock_updater = MagicMock()
+    mock_updater.backfill = AsyncMock(return_value=0)
+    with patch("cryptbot.main.OhlcvUpdater", return_value=mock_updater):
+        args = argparse.Namespace(
+            db=str(tmp_env["db"]),
+            data_dir=str(tmp_env["data_dir"]),
+            backfill_years=None,
+            fetch_profile="paper",
+        )
+        from cryptbot.main import _run_fetch_ohlcv
+        ret = _run_fetch_ohlcv(args)
+    assert ret == 0
+
+
+def test_fetch_ohlcv_uses_paper_profile_settings(tmp_env, monkeypatch):
+    """--fetch-profile paper のとき paper.pair と paper.timeframe が使われることを確認。"""
+    import argparse
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from cryptbot.config.settings import Settings, PaperSettings, LiveSettings
+    import cryptbot.main as main_mod
+
+    mock_settings = Settings(
+        paper=PaperSettings(pair="btc_jpy", timeframe="15min", momentum_window=20),
+        live=LiveSettings(pair="xrp_jpy", timeframe="1hour", ohlcv_backfill_years=1),
+    )
+    monkeypatch.setattr(main_mod, "load_settings", lambda: mock_settings)
+
+    captured = {}
+
+    def mock_updater_cls(**kwargs):
+        captured.update(kwargs)
+        m = MagicMock()
+        m.backfill = AsyncMock(return_value=0)
+        return m
+
+    with patch("cryptbot.main.OhlcvUpdater", side_effect=mock_updater_cls):
+        args = argparse.Namespace(
+            db=str(tmp_env["db"]),
+            data_dir=str(tmp_env["data_dir"]),
+            backfill_years=None,
+            fetch_profile="paper",
+        )
+        from cryptbot.main import _run_fetch_ohlcv
+        _run_fetch_ohlcv(args)
+
+    assert captured.get("pair") == "btc_jpy"
+    assert captured.get("timeframe") == "15min"
