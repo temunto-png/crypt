@@ -228,6 +228,15 @@ def _run_paper(args: argparse.Namespace) -> int:
     # 最新の needed 本に絞る
     data = data.tail(needed).reset_index(drop=True)
 
+    # OHLCV ロード後に必ず特徴量を生成する（normalize しないと MomentumStrategy が HOLD 固定）
+    from cryptbot.data.normalizer import normalize
+    data = normalize(data, momentum_window=settings.paper.momentum_window)
+    logger.info(
+        "paper: normalize 完了 (momentum_window=%d, rows=%d)",
+        settings.paper.momentum_window,
+        len(data),
+    )
+
     result = engine.run_one_bar(data)
 
     if result.skipped:
