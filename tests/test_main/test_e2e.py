@@ -152,3 +152,71 @@ def test_fetch_ohlcv_uses_paper_profile_settings(tmp_env, monkeypatch):
 
     assert captured.get("pair") == "btc_jpy"
     assert captured.get("timeframe") == "15min"
+
+
+def test_config_kill_switch_active_blocks_paper(tmp_env, monkeypatch):
+    """settings.kill_switch.active=True のとき KillSwitch が発動することを確認。"""
+    import argparse
+    from cryptbot.config.settings import Settings, PaperSettings, KillSwitchSettings
+    import cryptbot.main as main_mod
+
+    mock_settings = Settings(
+        paper=PaperSettings(pair="btc_jpy", timeframe="15min"),
+        kill_switch=KillSwitchSettings(active=True),
+    )
+    monkeypatch.setattr(main_mod, "load_settings", lambda: mock_settings)
+    _make_ohlcv_parquet(tmp_env["data_dir"], "btc_jpy", "15min", n=200)
+
+    args = argparse.Namespace(
+        db=str(tmp_env["db"]),
+        data_dir=str(tmp_env["data_dir"]),
+        confirm_live=False,
+    )
+    from cryptbot.main import _run_paper
+    ret = _run_paper(args)
+    assert ret == 0
+
+    conn = sqlite3.connect(tmp_env["db"])
+    rows = conn.execute(
+        "SELECT event_type FROM audit_log WHERE event_type='KILL_SWITCH_ACTIVATED'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) >= 1, "KillSwitch が settings から発動されていない"
+
+
+def test_paper_startup_config_snapshot_recorded(tmp_env, monkeypatch):
+    """Paper 起動時に設定スナップショットが audit_log に記録されることを確認。"""
+    import argparse
+    import json
+    from cryptbot.config.settings import Settings, PaperSettings
+    import cryptbot.main as main_mod
+
+    mock_settings = Settings(
+        paper=PaperSettings(
+            pair="btc_jpy", timeframe="15min",
+            strategy_name="momentum", momentum_threshold=3.0, momentum_window=20,
+        )
+    )
+    monkeypatch.setattr(main_mod, "load_settings", lambda: mock_settings)
+    _make_ohlcv_parquet(tmp_env["data_dir"], "btc_jpy", "15min", n=200)
+
+    args = argparse.Namespace(
+        db=str(tmp_env["db"]),
+        data_dir=str(tmp_env["data_dir"]),
+        confirm_live=False,
+    )
+    from cryptbot.main import _run_paper
+    _run_paper(args)
+
+    conn = sqlite3.connect(tmp_env["db"])
+    rows = conn.execute(
+        "SELECT details FROM audit_log WHERE event_type='startup_config'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) >= 1, "startup_config が audit_log に記録されていない"
+
+    details = json.loads(rows[0][0])
+    assert details.get("strategy_name") == "momentum"
+    assert details.get("momentum_threshold") == 3.0
+    assert details.get("momentum_window") == 20
+    assert details.get("timeframe") == "15min"

@@ -201,6 +201,7 @@ class Storage:
                   portfolio_value   REAL,
                   drawdown_pct      REAL,
                   raw_market_data   TEXT,
+                  details           TEXT,
                   prev_hash         TEXT NOT NULL,
                   record_hash       TEXT NOT NULL DEFAULT ''
                 );
@@ -283,6 +284,10 @@ class Storage:
             if "record_hash" not in al_cols:
                 conn.execute(
                     "ALTER TABLE audit_log ADD COLUMN record_hash TEXT NOT NULL DEFAULT ''"
+                )
+            if "details" not in al_cols:
+                conn.execute(
+                    "ALTER TABLE audit_log ADD COLUMN details TEXT"
                 )
 
             # マイグレーション: ohlcv_metadata に新カラムを追加
@@ -605,17 +610,23 @@ class Storage:
         """audit_log にレコードを追記する（ハッシュチェーン付き）。
 
         Args:
-          event_type: イベント種別（signal/fill/risk_stop/kill_switch/no_trade）
-          **kwargs: スキーマの任意フィールド
+          event_type: イベント種別（signal/fill/risk_stop/kill_switch/no_trade/startup_config）
+          **kwargs: スキーマの任意フィールド。既知フィールド以外は details カラムに JSON で保存する。
         """
-        allowed_fields = {
+        import json as _json
+
+        known_fields = {
             "strategy", "direction", "signal_confidence", "signal_reason",
             "fill_price", "fill_size", "fee", "slippage_pct",
             "portfolio_value", "drawdown_pct", "raw_market_data",
         }
-        unknown = set(kwargs) - allowed_fields
-        if unknown:
-            raise ValueError(f"audit_log に未知のフィールドが指定されました: {unknown}")
+        known_kwargs = {k: v for k, v in kwargs.items() if k in known_fields}
+        extra_kwargs = {k: v for k, v in kwargs.items() if k not in known_fields}
+
+        # 未知フィールドは details カラムに JSON でまとめて保存する
+        details_json: str | None = None
+        if extra_kwargs:
+            details_json = _json.dumps(extra_kwargs, ensure_ascii=False, default=str)
 
         timestamp = now_jst().isoformat()
 
@@ -636,17 +647,18 @@ class Storage:
             record: dict[str, Any] = {
                 "timestamp": timestamp,
                 "event_type": event_type,
-                "strategy": kwargs.get("strategy"),
-                "direction": kwargs.get("direction"),
-                "signal_confidence": kwargs.get("signal_confidence"),
-                "signal_reason": kwargs.get("signal_reason"),
-                "fill_price": kwargs.get("fill_price"),
-                "fill_size": kwargs.get("fill_size"),
-                "fee": kwargs.get("fee"),
-                "slippage_pct": kwargs.get("slippage_pct"),
-                "portfolio_value": kwargs.get("portfolio_value"),
-                "drawdown_pct": kwargs.get("drawdown_pct"),
-                "raw_market_data": kwargs.get("raw_market_data"),
+                "strategy": known_kwargs.get("strategy"),
+                "direction": known_kwargs.get("direction"),
+                "signal_confidence": known_kwargs.get("signal_confidence"),
+                "signal_reason": known_kwargs.get("signal_reason"),
+                "fill_price": known_kwargs.get("fill_price"),
+                "fill_size": known_kwargs.get("fill_size"),
+                "fee": known_kwargs.get("fee"),
+                "slippage_pct": known_kwargs.get("slippage_pct"),
+                "portfolio_value": known_kwargs.get("portfolio_value"),
+                "drawdown_pct": known_kwargs.get("drawdown_pct"),
+                "raw_market_data": known_kwargs.get("raw_market_data"),
+                "details": details_json,
             }
 
             # 現レコードの record_hash を計算（prev_hash + record 内容のハッシュ）
@@ -657,11 +669,11 @@ class Storage:
                 INSERT INTO audit_log
                   (timestamp, event_type, strategy, direction, signal_confidence,
                    signal_reason, fill_price, fill_size, fee, slippage_pct,
-                   portfolio_value, drawdown_pct, raw_market_data, prev_hash, record_hash)
+                   portfolio_value, drawdown_pct, raw_market_data, details, prev_hash, record_hash)
                 VALUES
                   (:timestamp, :event_type, :strategy, :direction, :signal_confidence,
                    :signal_reason, :fill_price, :fill_size, :fee, :slippage_pct,
-                   :portfolio_value, :drawdown_pct, :raw_market_data, :prev_hash, :record_hash)
+                   :portfolio_value, :drawdown_pct, :raw_market_data, :details, :prev_hash, :record_hash)
                 """,
                 {**record, "prev_hash": chain_seed, "record_hash": current_record_hash},
             )

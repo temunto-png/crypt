@@ -187,7 +187,33 @@ def _run_paper(args: argparse.Namespace) -> int:
     storage = Storage(db_path=db_path, data_dir=data_dir)
     storage.initialize()
 
+    # 起動時の設定スナップショットを audit_log に記録する（運用追跡・変更検知用）
+    storage.insert_audit_log(
+        "startup_config",
+        mode="paper",
+        strategy_name=settings.paper.strategy_name,
+        momentum_threshold=settings.paper.momentum_threshold,
+        momentum_window=settings.paper.momentum_window,
+        timeframe=settings.paper.timeframe,
+        pair=settings.paper.pair,
+        warmup_bars=settings.paper.warmup_bars,
+        daily_loss_pct=settings.circuit_breaker.daily_loss_pct,
+        max_drawdown_pct=settings.circuit_breaker.max_drawdown_pct,
+        kill_switch_active_config=settings.kill_switch.active,
+    )
+
     kill_switch = KillSwitch(storage)
+
+    # 設定ファイルで kill_switch.active=true が指定されている場合は即座に発動する
+    if settings.kill_switch.active and not kill_switch.active:
+        from cryptbot.risk.kill_switch import KillSwitchReason
+        kill_switch.activate(
+            reason=KillSwitchReason.MANUAL,
+            portfolio_value=0.0,
+            drawdown_pct=0.0,
+        )
+        logger.warning("paper: settings.kill_switch.active=True のため KillSwitch を発動しました")
+
     risk_manager = RiskManager(
         settings=settings.circuit_breaker,
         cvar_settings=settings.cvar,
@@ -421,6 +447,21 @@ def _run_live(args: argparse.Namespace) -> int:
     storage = Storage(db_path=db_path, data_dir=data_dir)
     storage.initialize()
 
+    # 起動時の設定スナップショットを audit_log に記録する（運用追跡・変更検知用）
+    storage.insert_audit_log(
+        "startup_config",
+        mode="live",
+        strategy_name=settings.live.strategy_name,
+        momentum_threshold=settings.live.momentum_threshold,
+        momentum_window=settings.live.momentum_window,
+        timeframe=settings.live.timeframe,
+        pair=settings.live.pair,
+        warmup_bars=settings.live.warmup_bars,
+        daily_loss_pct=settings.circuit_breaker.daily_loss_pct,
+        max_drawdown_pct=settings.circuit_breaker.max_drawdown_pct,
+        kill_switch_active_config=settings.kill_switch.active,
+    )
+
     # Public API 用 Exchange（OHLCV バックフィル + 定期更新）
     pub_exchange = BitbankExchange()
     fetcher = DataFetcher(exchange=pub_exchange, storage=storage)
@@ -432,6 +473,16 @@ def _run_live(args: argparse.Namespace) -> int:
     )
 
     kill_switch = KillSwitch(storage)
+
+    # 設定ファイルで kill_switch.active=true が指定されている場合は即座に発動する
+    if settings.kill_switch.active and not kill_switch.active:
+        from cryptbot.risk.kill_switch import KillSwitchReason
+        kill_switch.activate(
+            reason=KillSwitchReason.MANUAL,
+            portfolio_value=0.0,
+            drawdown_pct=0.0,
+        )
+        logger.warning("live: settings.kill_switch.active=True のため KillSwitch を発動しました")
 
     # fail-closed ゲートチェック（4 条件を全て検証）
     try:
